@@ -1,0 +1,22 @@
+# Restore a snapshot into a new claim. Do not overwrite or delete the original
+# PVC until Lazarus has passed integrity, API, and write/read validation.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lazarus-restore-YYYYMMDD
+  namespace: lazarus
+  labels:
+    app.kubernetes.io/name: lazarus
+    app.kubernetes.io/component: restore-candidate
+spec:
+  accessModes:
+    - ReadWriteOncePod
+  storageClassName: REPLACE_WITH_BLOCK_CSI_STORAGE_CLASS
+  resources:
+    requests:
+      # Must be at least as large as the source claim/snapshot.
+      storage: 20Gi
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: lazarus-manual-YYYYMMDDTHHMMSSZ

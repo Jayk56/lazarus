@@ -1,0 +1,5 @@
+---
+collections:
+  # The examples use 4.6.0 and its controller_* inputs.
+  - name: infra.aap_configuration
+    version: '4.6.0'

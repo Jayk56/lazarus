@@ -1,0 +1,15 @@
+image:
+  repository: example.invalid/enterprise/lazarus
+  tag: test
+
+auth:
+  existingSecret: lazarus-api-tokens
+
+persistence:
+  storageClassName: example-block-csi
+
+serviceTLS:
+  enabled: true
+
+route:
+  enabled: false

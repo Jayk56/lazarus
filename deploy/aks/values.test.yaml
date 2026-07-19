@@ -1,0 +1,34 @@
+# Temporary AKS validation profile. Supply image.repository and image.digest at
+# install time. This profile is not the OpenShift production configuration.
+image:
+  repository: example.invalid/lazarus
+  tag: test
+
+auth:
+  existingSecret: lazarus-api-tokens
+
+persistence:
+  storageClassName: managed-csi
+  accessMode: ReadWriteOncePod
+  size: 1Gi
+
+podSecurityContext:
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+
+service:
+  port: 8080
+
+serviceTLS:
+  enabled: false
+
+route:
+  enabled: false
+
+networkPolicy:
+  enabled: true
+  allowOpenShiftIngress: false
+  allowOpenShiftMonitoring: false
+
+serviceMonitor:
+  enabled: false

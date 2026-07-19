@@ -1,0 +1,128 @@
+---
+- name: Capture the starting maintenance state
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_url: "{{ lookup('env', 'LAZARUS_URL') }}"
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    maintenance_id: "{{ lookup('env', 'MAINTENANCE_ID') }}"
+    # This directory must survive the job. The playbook always uses the first
+    # saved file and never overwrites it.
+    lazarus_capture_cache_dir: "{{ lookup('env', 'LAZARUS_CAPTURE_CACHE_DIR') }}"
+    # Replace this sample with the output of your discovery job.
+    capture_document:
+      captured_by: aap
+      targets:
+        - target_id: web-01
+          lock_key: vm:web-01.example
+          kind: vm
+          host: web-01.example
+          original_state: running
+        - target_id: db-01
+          lock_key: vm:db-01.example
+          kind: vm
+          host: db-01.example
+          original_state: stopped
+  tasks:
+    - name: Check capture settings
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | length > 0
+          - lazarus_capture_cache_dir | length > 0
+          - capture_document is mapping
+          - capture_document.targets | default([]) | length > 0
+        fail_msg: >-
+          Lazarus inputs and a LAZARUS_CAPTURE_CACHE_DIR on persistent storage
+          are required.
+
+    - name: Build a safe cache filename
+      ansible.builtin.set_fact:
+        capture_cache_file: >-
+          {{ lazarus_capture_cache_dir }}/{{ maintenance_id | hash('sha256') }}.json
+
+    - name: Create the capture cache directory
+      ansible.builtin.file:
+        path: "{{ lazarus_capture_cache_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Check for a saved capture
+      ansible.builtin.stat:
+        path: "{{ capture_cache_file }}"
+      register: capture_cache
+
+    - name: Save discovery before calling Lazarus
+      when: not capture_cache.stat.exists
+      no_log: true
+      ansible.builtin.copy:
+        dest: "{{ capture_cache_file }}"
+        content: "{{ capture_document | to_nice_json }}\n"
+        mode: "0600"
+
+    - name: Load the saved discovery document
+      no_log: true
+      ansible.builtin.slurp:
+        src: "{{ capture_cache_file }}"
+      register: cached_capture
+
+    - name: Prepare the saved document for this request and any retry
+      no_log: true
+      ansible.builtin.set_fact:
+        capture_submission: "{{ cached_capture.content | b64decode | from_json }}"
+        capture_request_id: "capture-{{ maintenance_id | hash('sha256') }}"
+
+    - name: Check every captured target
+      ansible.builtin.assert:
+        that:
+          - item.target_id | default('') | length > 0
+          - item.lock_key | default('') | length > 0
+          - item.original_state | default('') in ['running', 'stopped', 'degraded', 'unknown']
+        fail_msg: Each target needs target_id, lock_key, and a valid original_state.
+      loop: "{{ capture_submission.targets }}"
+      loop_control:
+        label: "{{ item.target_id | default('invalid target') }}"
+
+    - name: Require unique target IDs
+      ansible.builtin.assert:
+        that: >-
+          capture_submission.targets | map(attribute='target_id') | list | unique | length
+          == capture_submission.targets | length
+        fail_msg: target_id must be unique within this maintenance; lock_key may repeat.
+
+    - name: Save the discovery document in the AAP job output
+      no_log: true
+      ansible.builtin.set_stats:
+        data:
+          lazarus_maintenance_id: "{{ maintenance_id }}"
+          lazarus_capture_document: "{{ capture_submission }}"
+
+    - name: Submit capture from the saved file
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}/capture"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          X-Request-ID: "{{ capture_request_id }}"
+        body_format: json
+        body: "{{ capture_submission }}"
+        status_code: [200, 201, 409, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: capture_result
+      retries: 3
+      delay: 2
+      until: capture_result.status not in [500, 503]
+      changed_when: capture_result.status == 201
+
+    - name: Explain capture or lock conflicts
+      when: capture_result.status == 409
+      ansible.builtin.fail:
+        msg: >-
+          Lazarus rejected the saved capture:
+          {{ capture_result.json.reason |
+          default(capture_result.json.error) | default('conflict') }}.
+          Do not rediscover or replace this cache while recovering.

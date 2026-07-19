@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+{{- $shutdownSeconds := int (trimSuffix "s" .Values.config.shutdownTimeout) }}
+{{- if ge (add $shutdownSeconds 5) (int .Values.terminationGracePeriodSeconds) }}
+{{- fail "config.shutdownTimeout plus the 5s handler fallback must be lower than terminationGracePeriodSeconds" }}
+{{- end }}
+{{- if or (hasKey .Values.podLabels "app.kubernetes.io/name") (hasKey .Values.podLabels "app.kubernetes.io/instance") }}
+{{- fail "podLabels must not override app.kubernetes.io/name or app.kubernetes.io/instance" }}
+{{- end }}
+metadata:
+  name: {{ include "lazarus.fullname" . }}
+  labels:
+    {{- include "lazarus.labels" . | nindent 4 }}
+spec:
+  # Use one pod; see docs/architecture.md#operating-constraints.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "lazarus.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lazarus.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "lazarus.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        {{- with .Values.podSecurityContext.fsGroup }}
+        fsGroup: {{ . }}
+        {{- end }}
+        {{- with .Values.podSecurityContext.fsGroupChangePolicy }}
+        fsGroupChangePolicy: {{ . }}
+        {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: lazarus
+          image: {{ include "lazarus.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          ports:
+            - name: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: LAZARUS_ADDR
+              value: {{ printf ":%v" .Values.service.port | quote }}
+            - name: LAZARUS_DB_PATH
+              value: /var/lib/lazarus/lazarus.db
+            - name: LAZARUS_TOKEN_FILE
+              value: /var/run/secrets/lazarus/{{ .Values.auth.key }}
+            - name: LAZARUS_BACKUP_DIR
+              value: /var/lib/lazarus/backups
+            - name: LAZARUS_BACKUP_KEEP
+              value: {{ .Values.config.backupRetention | quote }}
+            - name: LAZARUS_BACKUP_MIN_AGE
+              value: {{ .Values.config.backupMinAge | quote }}
+            - name: LAZARUS_WRITE_TIMEOUT
+              value: {{ .Values.config.httpWriteTimeout | quote }}
+            - name: LAZARUS_SHUTDOWN_TIMEOUT
+              value: {{ .Values.config.shutdownTimeout | quote }}
+            {{- if .Values.serviceTLS.enabled }}
+            - name: LAZARUS_TLS_CERT_FILE
+              value: /var/run/tls/lazarus/{{ .Values.serviceTLS.certKey }}
+            - name: LAZARUS_TLS_KEY_FILE
+              value: /var/run/tls/lazarus/{{ .Values.serviceTLS.keyKey }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/lazarus
+            - name: api-tokens
+              mountPath: /var/run/secrets/lazarus
+              readOnly: true
+            {{- if .Values.serviceTLS.enabled }}
+            - name: serving-cert
+              mountPath: /var/run/tls/lazarus
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+              scheme: {{ ternary "HTTPS" "HTTP" .Values.serviceTLS.enabled }}
+            failureThreshold: {{ .Values.probes.startupFailureThreshold }}
+            periodSeconds: {{ .Values.probes.startupPeriodSeconds }}
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+              scheme: {{ ternary "HTTPS" "HTTP" .Values.serviceTLS.enabled }}
+            failureThreshold: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+              scheme: {{ ternary "HTTPS" "HTTP" .Values.serviceTLS.enabled }}
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "lazarus.claimName" . }}
+        - name: api-tokens
+          secret:
+            secretName: {{ .Values.auth.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.auth.key }}
+                path: {{ .Values.auth.key }}
+        {{- if .Values.serviceTLS.enabled }}
+        - name: serving-cert
+          secret:
+            secretName: {{ include "lazarus.servingCertSecret" . }}
+            defaultMode: 0440
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

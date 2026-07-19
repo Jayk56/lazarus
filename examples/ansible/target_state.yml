@@ -1,0 +1,120 @@
+---
+- name: Set Lazarus target state
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_url: "{{ lookup('env', 'LAZARUS_URL') }}"
+    lazarus_operator_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    lazarus_admin_token: "{{ lookup('env', 'LAZARUS_ADMIN_TOKEN') }}"
+    lazarus_api_token: >-
+      {{ lazarus_admin_token if (lazarus_admin_token | length > 0)
+         else lazarus_operator_token }}
+    maintenance_id: "{{ lookup('env', 'MAINTENANCE_ID') }}"
+    target_id: web-01
+    target_state: stopping
+    justification: ""
+    target_detail: {}
+  tasks:
+    - name: Check state-change inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | length > 0
+          - lazarus_api_token | length > 0
+          - maintenance_id | length > 0
+          - target_id | length > 0
+          - target_state in ['stopping', 'stopped', 'starting', 'healthy', 'failed', 'skipped']
+          - target_detail is mapping
+
+    - name: Require admin approval to skip a target
+      when: target_state == 'skipped'
+      ansible.builtin.assert:
+        that:
+          - lazarus_admin_token | length > 0
+          - justification | trim | length > 0
+        fail_msg: Skipping a target requires LAZARUS_ADMIN_TOKEN and a non-empty justification.
+
+    - name: Read the target and its ETag
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_api_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: target_get
+      retries: 3
+      delay: 2
+      until: target_get.status not in [500, 503]
+      changed_when: false
+
+    - name: Build a request ID for this target version
+      when: target_get.json.state != target_state
+      ansible.builtin.set_fact:
+        target_request_id: >-
+          target-{{ ((awx_job_id | default('local') | string) ~ '|' ~
+          maintenance_id ~ '|' ~ target_id ~ '|' ~ target_get.etag ~ '|' ~
+          target_state) | hash('sha256') }}
+
+    - name: Change target state with If-Match
+      when: target_get.json.state != target_state
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ lazarus_api_token }}"
+          If-Match: "{{ target_get.etag }}"
+          X-Request-ID: "{{ target_request_id }}"
+        body_format: json
+        body: >-
+          {{ {'state': target_state, 'detail': target_detail}
+             | combine({'justification': justification}
+             if (justification | trim | length > 0) else {}) }}
+        status_code: [200, 400, 403, 409, 412, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: target_change
+      retries: 3
+      delay: 2
+      until: target_change.status not in [500, 503]
+      changed_when: target_change.status == 200
+
+    - name: Read the target again after a conflict
+      when:
+        - target_change is defined
+        - target_change.status | default(0) == 412
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_api_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: target_reconcile
+      retries: 3
+      delay: 2
+      until: target_reconcile.status not in [500, 503]
+      changed_when: false
+
+    - name: Accept only the requested target state
+      when:
+        - target_change is defined
+        - target_change.status | default(0) == 412
+      ansible.builtin.assert:
+        that: target_reconcile.json.state == target_state
+        fail_msg: >-
+          Another request changed {{ target_id }} to
+          {{ target_reconcile.json.state }}; stop for review.
+
+    - name: Explain rejected target changes
+      when:
+        - target_change is defined
+        - target_change.status | default(200) in [400, 403, 409]
+      ansible.builtin.fail:
+        msg: >-
+          Lazarus rejected {{ target_id }} state {{ target_state }}:
+          {{ target_change.json.reason |
+          default(target_change.json.error) | default('request rejected') }}.

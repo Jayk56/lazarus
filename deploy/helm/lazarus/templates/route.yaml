@@ -1,0 +1,39 @@
+{{- if .Values.route.enabled }}
+{{- if and (eq .Values.route.tls.termination "reencrypt") (not .Values.serviceTLS.enabled) }}
+{{- fail "route re-encrypt termination requires serviceTLS.enabled=true" }}
+{{- end }}
+{{- if and (eq .Values.route.tls.termination "edge") .Values.serviceTLS.enabled }}
+{{- fail "route edge termination requires serviceTLS.enabled=false" }}
+{{- end }}
+{{- if and (eq .Values.route.tls.termination "reencrypt") (not .Values.route.tls.destinationCACertificate) }}
+{{- fail "route.tls.destinationCACertificate is required for a re-encrypt route" }}
+{{- end }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "lazarus.fullname" . }}
+  labels:
+    {{- include "lazarus.labels" . | nindent 4 }}
+  {{- with .Values.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.route.host }}
+  host: {{ . | quote }}
+  {{- end }}
+  port:
+    targetPort: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+  to:
+    kind: Service
+    name: {{ include "lazarus.fullname" . }}
+    weight: 100
+  tls:
+    termination: {{ .Values.route.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy }}
+    {{- with .Values.route.tls.destinationCACertificate }}
+    destinationCACertificate: |
+      {{- . | nindent 6 }}
+    {{- end }}
+  wildcardPolicy: None
+{{- end }}

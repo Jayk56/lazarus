@@ -1,0 +1,222 @@
+---
+# Variable names follow infra.aap_configuration 4.6.0 for AAP 2.5+.
+# Set the two component job-template names for your environment.
+# Create a "Lazarus API token" credential in Controller that supplies
+# LAZARUS_TOKEN. Create a separate administrator credential that supplies
+# LAZARUS_ADMIN_TOKEN for recovery, skip, and backup. Keep both secrets in
+# Controller or your vault; never add them to this file.
+lazarus_stop_job_template: CHANGE-ME - stop and verify components
+lazarus_start_job_template: CHANGE-ME - start and health-check components
+lazarus_organization: Default
+lazarus_project: Lazarus automation
+lazarus_credential: Lazarus API token
+lazarus_admin_credential: Lazarus API administrator token
+# Use storage mounted into the Controller execution environment (EE) that
+# survives the capture job. Do not use a container-local /tmp path.
+lazarus_capture_cache_dir: CHANGE-ME - mounted cache that survives AAP jobs
+
+controller_templates:
+  - name: Lazarus - create maintenance
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/create.yml
+    credentials: ["{{ lazarus_credential }}"]
+  - name: Lazarus - capture
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/capture.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars:
+      lazarus_capture_cache_dir: "{{ lazarus_capture_cache_dir }}"
+  - name: Lazarus - maintenance stopping
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {maintenance_state: stopping}
+  - name: Lazarus - web stopping
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/target_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {target_id: web-01, target_state: stopping}
+  - name: Lazarus - observe web stopped
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/observe.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars:
+      target_id: web-01
+      observation: {source: aap, check: component-stop, observed_state: stopped}
+  - name: Lazarus - web stopped
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/target_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {target_id: web-01, target_state: stopped}
+  - name: Lazarus - maintenance stopped
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {maintenance_state: stopped}
+  - name: Lazarus - maintenance waiting
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {maintenance_state: waiting}
+  - name: Lazarus - maintenance starting
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {maintenance_state: starting}
+  - name: Lazarus - web starting
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/target_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {target_id: web-01, target_state: starting}
+  - name: Lazarus - observe web healthy
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/observe.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars:
+      target_id: web-01
+      observation: {source: aap, check: component-health, observed_state: healthy}
+  - name: Lazarus - web healthy
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/target_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {target_id: web-01, target_state: healthy}
+  - name: Lazarus - complete
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars: {maintenance_state: completed}
+  - name: Lazarus - record workflow failure
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_credential }}"]
+    extra_vars:
+      maintenance_state: failed
+      maintenance_detail:
+        source: aap_failure_path
+        guidance: Reopen this same maintenance and resume without rediscovery.
+  - name: Lazarus - reopen failed maintenance
+    organization: "{{ lazarus_organization }}"
+    project: "{{ lazarus_project }}"
+    playbook: examples/ansible/maintenance_state.yml
+    credentials: ["{{ lazarus_admin_credential }}"]
+    ask_variables_on_launch: true
+
+controller_workflows:
+  - name: Lazarus maintenance workflow
+    organization: "{{ lazarus_organization }}"
+    survey_enabled: true
+    survey_spec:
+      name: Lazarus maintenance inputs
+      description: Maintenance identity and Lazarus endpoint.
+      spec:
+        - question_name: Maintenance ID
+          question_description: Caller-owned ID; reuse only for the same run.
+          variable: maintenance_id
+          type: text
+          required: true
+          min: 1
+          max: 200
+        - question_name: Lazarus URL
+          question_description: Lazarus URL ending in /api/v1.
+          variable: lazarus_url
+          type: text
+          required: true
+          min: 12
+          max: 512
+        - question_name: Change ticket
+          question_description: Required change ticket or maintenance reference.
+          variable: change_ticket
+          type: text
+          required: true
+          min: 1
+          max: 200
+        - question_name: Workflow version
+          question_description: Automation label for this run.
+          variable: workflow_version
+          type: text
+          required: true
+          default: example-workflow
+          min: 1
+          max: 100
+    simplified_workflow_nodes:
+      - identifier: create
+        unified_job_template: Lazarus - create maintenance
+        success_nodes: [capture]
+      - identifier: capture
+        unified_job_template: Lazarus - capture
+        success_nodes: [maintenance_stopping]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_stopping
+        unified_job_template: Lazarus - maintenance stopping
+        success_nodes: [web_stopping]
+        failure_nodes: [mark_failed]
+      - identifier: web_stopping
+        unified_job_template: Lazarus - web stopping
+        success_nodes: [component_stop]
+        failure_nodes: [mark_failed]
+      - identifier: component_stop
+        unified_job_template: "{{ lazarus_stop_job_template }}"
+        success_nodes: [observe_stopped]
+        failure_nodes: [mark_failed]
+      - identifier: observe_stopped
+        unified_job_template: Lazarus - observe web stopped
+        success_nodes: [web_stopped]
+        failure_nodes: [mark_failed]
+      - identifier: web_stopped
+        unified_job_template: Lazarus - web stopped
+        success_nodes: [maintenance_stopped]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_stopped
+        unified_job_template: Lazarus - maintenance stopped
+        success_nodes: [maintenance_waiting]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_waiting
+        unified_job_template: Lazarus - maintenance waiting
+        success_nodes: [approval]
+        failure_nodes: [mark_failed]
+      - identifier: approval
+        approval_node:
+          name: Approve infrastructure maintenance completion
+          description: Continue after the infrastructure maintenance is complete.
+          timeout: 86400
+        success_nodes: [maintenance_starting]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_starting
+        unified_job_template: Lazarus - maintenance starting
+        success_nodes: [web_starting]
+        failure_nodes: [mark_failed]
+      - identifier: web_starting
+        unified_job_template: Lazarus - web starting
+        success_nodes: [component_start]
+        failure_nodes: [mark_failed]
+      - identifier: component_start
+        unified_job_template: "{{ lazarus_start_job_template }}"
+        success_nodes: [observe_healthy]
+        failure_nodes: [mark_failed]
+      - identifier: observe_healthy
+        unified_job_template: Lazarus - observe web healthy
+        success_nodes: [web_healthy]
+        failure_nodes: [mark_failed]
+      - identifier: web_healthy
+        unified_job_template: Lazarus - web healthy
+        success_nodes: [complete]
+        failure_nodes: [mark_failed]
+      - identifier: complete
+        unified_job_template: Lazarus - complete
+        failure_nodes: [mark_failed]
+      - identifier: mark_failed
+        unified_job_template: Lazarus - record workflow failure

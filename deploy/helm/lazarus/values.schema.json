@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "auth", "persistence"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
+        },
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]},
+        "pullSecrets": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "auth": {
+      "type": "object",
+      "required": ["existingSecret"],
+      "properties": {
+        "existingSecret": {"type": "string", "minLength": 1},
+        "key": {"type": "string", "minLength": 1}
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["accessMode", "size"],
+      "properties": {
+        "storageClassName": {"type": "string"},
+        "accessMode": {"enum": ["ReadWriteOncePod", "ReadWriteOnce"]},
+        "size": {"type": "string", "minLength": 1},
+        "existingClaim": {"type": "string"}
+      }
+    },
+    "serviceTLS": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "existingSecret": {"type": "string"},
+        "caConfigMap": {
+          "type": "object",
+          "properties": {"name": {"type": "string"}, "key": {"type": "string"}}
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "tls": {
+          "type": "object",
+          "properties": {
+            "termination": {"enum": ["edge", "reencrypt"]},
+            "insecureEdgeTerminationPolicy": {"enum": ["None", "Redirect"]}
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backupRetention": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "backupMinAge": {"type": "string", "description": "Minimum backup age, such as 24h or 30m.", "allOf": [{"pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"}, {"pattern": "[1-9]"}]},
+        "httpWriteTimeout": {"type": "string", "description": "Maximum response time, such as 2m or 30s.", "allOf": [{"pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"}, {"pattern": "[1-9]"}]},
+        "shutdownTimeout": {"type": "string", "pattern": "^[1-9][0-9]*s$"}
+      }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "fsGroup": {"type": ["integer", "null"], "minimum": 1},
+        "fsGroupChangePolicy": {"enum": ["", "Always", "OnRootMismatch"]}
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startupFailureThreshold", "startupPeriodSeconds"],
+      "properties": {
+        "startupFailureThreshold": {"type": "integer", "minimum": 1, "maximum": 1800},
+        "startupPeriodSeconds": {"type": "integer", "minimum": 1, "maximum": 60}
+      }
+    },
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": 2}
+  },
+  "additionalProperties": true
+}

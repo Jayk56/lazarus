@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+{{- if and .Values.serviceTLS.enabled (not .Values.serviceTLS.existingSecret) (hasKey .Values.service.annotations "service.beta.openshift.io/serving-cert-secret-name") }}
+{{- fail "service.annotations must not override the generated OpenShift serving-cert Secret name" }}
+{{- end }}
+metadata:
+  name: {{ include "lazarus.fullname" . }}
+  labels:
+    {{- include "lazarus.labels" . | nindent 4 }}
+  annotations:
+    {{- if and .Values.serviceTLS.enabled (not .Values.serviceTLS.existingSecret) }}
+    service.beta.openshift.io/serving-cert-secret-name: {{ include "lazarus.servingCertSecret" . }}
+    {{- end }}
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "lazarus.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+      port: {{ .Values.service.port }}
+      protocol: TCP
+      targetPort: {{ ternary "https" "http" .Values.serviceTLS.enabled }}

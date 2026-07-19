@@ -1,0 +1,39 @@
+# Build output
+/bin/
+/dist/
+/coverage/
+*.coverprofile
+
+# Local runtime state
+/.local/
+/.uv-cache/
+/.pytest_cache/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.backup
+*.sha256
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+tokens.json
+/tokens
+/tokens.*
+*-secret.yaml
+values.local.yaml
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local agent state
+/.claude/
+/.agents/
+/.codex/

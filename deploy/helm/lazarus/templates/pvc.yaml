@@ -1,0 +1,22 @@
+{{- if not .Values.persistence.existingClaim }}
+{{- if not .Values.persistence.storageClassName }}
+{{- fail "persistence.storageClassName must name a tested block-backed StorageClass when persistence.existingClaim is empty" }}
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "lazarus.fullname" . }}
+  labels:
+    {{- include "lazarus.labels" . | nindent 4 }}
+  {{- with .Values.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  storageClassName: {{ .Values.persistence.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

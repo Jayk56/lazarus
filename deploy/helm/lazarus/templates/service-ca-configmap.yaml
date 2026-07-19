@@ -1,0 +1,10 @@
+{{- if and .Values.serviceTLS.enabled (not .Values.serviceTLS.existingSecret) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lazarus.fullname" . }}-service-ca
+  labels:
+    {{- include "lazarus.labels" . | nindent 4 }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+{{- end }}

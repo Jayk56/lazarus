@@ -1,0 +1,47 @@
+# Copy this file to values.local.yaml (ignored by Git) and replace every
+# example value. Never put API tokens or private keys in Helm values.
+image:
+  repository: registry.example.com/platform/lazarus
+  digest: sha256:REPLACE_WITH_SIGNED_IMAGE_DIGEST
+  pullPolicy: IfNotPresent
+  pullSecrets:
+    - enterprise-registry-pull
+
+auth:
+  existingSecret: lazarus-api-tokens
+  key: tokens
+
+persistence:
+  storageClassName: REPLACE_WITH_BLOCK_CSI_STORAGE_CLASS
+  accessMode: ReadWriteOncePod
+  # Size for the database, SQLite working files, and retained full backups.
+  # See docs/operations.md.
+  size: 20Gi
+
+service:
+  port: 8443
+
+serviceTLS:
+  enabled: true
+
+# Install once with the Route disabled. After OpenShift injects the service CA,
+# follow docs/openshift.md to enable the re-encrypt Route with that CA.
+route:
+  enabled: false
+  host: lazarus.apps.example.com
+  annotations:
+    # Keep above the measured synchronous backup duration and aligned with
+    # config.httpWriteTimeout.
+    haproxy.router.openshift.io/timeout: 3m
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    destinationCACertificate: ""
+
+networkPolicy:
+  enabled: true
+  allowOpenShiftIngress: true
+  allowOpenShiftMonitoring: true
+
+serviceMonitor:
+  enabled: true

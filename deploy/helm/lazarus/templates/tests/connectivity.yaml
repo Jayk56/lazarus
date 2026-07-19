@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "lazarus.fullname" . }}-test
+  labels:
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | quote }}
+    app.kubernetes.io/component: test
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.image.pullSecrets }}
+  imagePullSecrets:
+    {{- range . }}
+    - name: {{ . }}
+    {{- end }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: healthcheck
+      image: {{ include "lazarus.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      args:
+        - healthcheck
+        - --url
+        - {{ printf "%s://%s:%v/readyz" (ternary "https" "http" .Values.serviceTLS.enabled) (include "lazarus.fullname" .) .Values.service.port | quote }}
+        {{- if .Values.serviceTLS.enabled }}
+        - --insecure
+        {{- end }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true

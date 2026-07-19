@@ -1,0 +1,32 @@
+---
+- name: Apply Lazarus templates to AAP
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - workflow.yml
+  vars:
+    aap_hostname: "{{ lookup('env', 'AAP_HOSTNAME') }}"
+    aap_token: "{{ lookup('env', 'AAP_TOKEN') }}"
+    aap_validate_certs: true
+    aap_configuration_secure_logging: true
+  pre_tasks:
+    - name: Check AAP and template inputs
+      ansible.builtin.assert:
+        that:
+          - aap_hostname | length > 0
+          - aap_token | length > 0
+          - lazarus_organization | length > 0
+          - lazarus_project | length > 0
+          - lazarus_credential | length > 0
+          - lazarus_admin_credential | length > 0
+          - not (lazarus_capture_cache_dir is match('^CHANGE-ME'))
+          - not (lazarus_stop_job_template is match('^CHANGE-ME'))
+          - not (lazarus_start_job_template is match('^CHANGE-ME'))
+        fail_msg: >-
+          Set AAP_HOSTNAME/AAP_TOKEN and replace the organization, project,
+          credential, and component job-template placeholders.
+      no_log: true
+  roles:
+    - infra.aap_configuration.controller_job_templates
+    - infra.aap_configuration.controller_workflow_job_templates
