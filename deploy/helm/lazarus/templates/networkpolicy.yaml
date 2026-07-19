@@ -1,0 +1,51 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "lazarus.fullname" . }}
+  labels:
+    {{- include "lazarus.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "lazarus.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow the chart's same-namespace test pod.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: test
+      ports:
+        - port: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+          protocol: TCP
+    {{- if .Values.networkPolicy.allowOpenShiftIngress }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ""
+      ports:
+        - port: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+          protocol: TCP
+    {{- end }}
+    {{- if .Values.networkPolicy.allowOpenShiftMonitoring }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: monitoring
+      ports:
+        - port: {{ ternary "https" "http" .Values.serviceTLS.enabled }}
+          protocol: TCP
+    {{- end }}
+    {{- with .Values.networkPolicy.additionalIngressPeers }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - port: {{ ternary "https" "http" $.Values.serviceTLS.enabled }}
+          protocol: TCP
+    {{- end }}
+  # Lazarus does not need outbound network access while running.
+  egress: []
+{{- end }}

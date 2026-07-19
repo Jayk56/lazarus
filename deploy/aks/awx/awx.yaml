@@ -1,0 +1,77 @@
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: awx
+  namespace: awx
+spec:
+  replicas: 1
+  admin_user: admin
+  admin_password_secret: awx-admin-password
+  service_type: ClusterIP
+  ingress_type: none
+
+  image: quay.io/ansible/awx
+  image_version: 24.6.1
+  image_pull_policy: IfNotPresent
+
+  postgres_storage_class: managed-csi
+  postgres_storage_requirements:
+    requests:
+      storage: 8Gi
+  postgres_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  postgres_data_volume_init: true
+
+  # Projects synchronize from the public repository and do not need a volume.
+  projects_persistence: false
+
+  task_resource_requirements:
+    requests:
+      cpu: 250m
+      memory: 768Mi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+  web_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 750m
+      memory: 2Gi
+  ee_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  redis_resource_requirements:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  rsyslog_resource_requirements:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  init_container_resource_requirements:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  create_preload_data: false
+  garbage_collect_secrets: false

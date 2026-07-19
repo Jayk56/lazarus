@@ -1,0 +1,12 @@
+Lazarus has been installed.
+
+1. Confirm the data volume is Bound and uses the expected StorageClass:
+   kubectl get pvc {{ include "lazarus.claimName" . }} -n {{ .Release.Namespace }}
+
+2. Confirm exactly one pod becomes Ready:
+   kubectl rollout status deployment/{{ include "lazarus.fullname" . }} -n {{ .Release.Namespace }}
+
+3. Run the documented smoke test before using Lazarus for maintenance state.
+
+Helm will keep the claim during uninstall. Verify the underlying persistent
+volume reclaim policy separately.

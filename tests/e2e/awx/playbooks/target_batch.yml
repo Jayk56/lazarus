@@ -1,0 +1,35 @@
+---
+- name: Process one deterministic ordered target batch
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../fixture.yml
+  vars:
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    fixture_group: stop_app_services
+    fixture_failure_target_id: ""
+  tasks:
+    - name: Select the exact ordered batch contract
+      ansible.builtin.set_fact:
+        target_ids: "{{ lookup('vars', 'fixture_' ~ fixture_group) }}"
+        target_transition_state: "{{ 'stopping' if fixture_group is match('^stop_') else 'starting' }}"
+        target_final_state: "{{ 'stopped' if fixture_group is match('^stop_') else 'healthy' }}"
+        fixture_desired_state: "{{ 'stopped' if fixture_group is match('^stop_') else 'running' }}"
+
+    - name: Validate batch inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - fixture_group in ['stop_app_services', 'stop_nodeagent', 'stop_dmgr', 'start_dmgr', 'start_nodeagent', 'start_app_services']
+          - target_ids | length > 0
+          - fixture_failure_target_id | length == 0 or fixture_failure_target_id in target_ids
+          - fixture_failure_target_id | length == 0 or fixture_group == 'stop_app_services'
+
+    - name: Process targets sequentially in declared order
+      ansible.builtin.include_tasks: tasks/target_once.yml
+      loop: "{{ target_ids }}"
+      loop_control:
+        loop_var: target_id
+        label: "{{ target_id }}"

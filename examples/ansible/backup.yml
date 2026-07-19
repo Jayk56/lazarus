@@ -1,0 +1,108 @@
+---
+- name: Create a Lazarus backup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # AAP values override these local defaults.
+    lazarus_url: "{{ lookup('env', 'LAZARUS_URL') }}"
+    # AAP supplies the administrator token through a protected credential.
+    lazarus_token: "{{ lookup('env', 'LAZARUS_ADMIN_TOKEN') }}"
+    lazarus_backup_export_dir: "{{ lookup('env', 'LAZARUS_BACKUP_EXPORT_DIR') }}"
+  tasks:
+    - name: Check backup settings
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | length > 0
+          - lazarus_token | length > 0
+          - lazarus_backup_export_dir | length > 0
+        fail_msg: >-
+          LAZARUS_ADMIN_TOKEN and LAZARUS_BACKUP_EXPORT_DIR are required.
+          Export storage must be outside the Lazarus volume.
+
+    - name: Use one request ID for all retries
+      ansible.builtin.set_fact:
+        backup_request_id: "aap-backup-{{ now(utc=true, fmt='%Y%m%dT%H%M%S%fZ') }}"
+
+    - name: Create export directory
+      ansible.builtin.file:
+        path: "{{ lazarus_backup_export_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Ask Lazarus to create a backup
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/admin/backups"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          X-Request-ID: "{{ backup_request_id }}"
+        timeout: "{{ lazarus_backup_timeout | default(150) | int }}"
+        status_code: [201, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: backup_result
+      retries: 3
+      delay: 5
+      until: backup_result.status not in [500, 503]
+      changed_when: backup_result.status == 201
+
+    - name: Check that Lazarus returned a verified backup
+      ansible.builtin.assert:
+        that:
+          - backup_result.status == 201
+          - backup_result.json.filename | default('') | length > 0
+          - backup_result.json.sha256 | default('') | length == 64
+        fail_msg: >-
+          Lazarus did not return a verified database and manifest; no export was
+          attempted. Check the request ID before retrying.
+
+    - name: Download the verified database
+      no_log: true
+      ansible.builtin.get_url:
+        url: "{{ lazarus_url }}/admin/backups/{{ backup_result.json.filename }}"
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        dest: "{{ lazarus_backup_export_dir }}/{{ backup_result.json.filename }}"
+        mode: "0600"
+        checksum: "sha256:{{ backup_result.json.sha256 }}"
+        timeout: "{{ lazarus_backup_timeout | default(150) | int }}"
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: backup_database_export
+      retries: 3
+      delay: 5
+      until: backup_database_export is succeeded
+      when: backup_result.status == 201
+
+    - name: Download the matching manifest
+      no_log: true
+      ansible.builtin.get_url:
+        url: "{{ lazarus_url }}/admin/backups/{{ backup_result.json.filename }}.manifest.json"
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        dest: "{{ lazarus_backup_export_dir }}/{{ backup_result.json.filename }}.manifest.json"
+        mode: "0600"
+        timeout: "{{ lazarus_backup_timeout | default(150) | int }}"
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: backup_manifest_export
+      retries: 3
+      delay: 5
+      until: backup_manifest_export is succeeded
+      when: backup_result.status == 201
+
+    - name: Check that Lazarus recorded the backup
+      ansible.builtin.assert:
+        that: backup_result.json.audit_recorded | bool
+        fail_msg: >-
+          The verified pair was exported, but event history is missing
+          backup.created. Keep the pair and alert the operator; do not create
+          another backup without checking the request ID.
+
+    - name: Report the exported files
+      ansible.builtin.debug:
+        msg: >-
+          Exported {{ backup_result.json.filename }} and its manifest to
+          {{ lazarus_backup_export_dir }}. Move the pair to approved object
+          storage and retain it under the approved retention policy.
+      when: backup_result.status == 201

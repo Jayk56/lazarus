@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-server
+  labels:
+    app.kubernetes.io/name: awx-fixture
+    app.kubernetes.io/component: node
+    app.kubernetes.io/part-of: lazarus-e2e
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: awx-fixture
+      app.kubernetes.io/component: node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: awx-fixture
+        app.kubernetes.io/component: node
+        app.kubernetes.io/part-of: lazarus-e2e
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: fixture
+          image: lazarus-awx-fixture:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: FIXTURE_PROFILE
+              value: node
+            - name: FIXTURE_STATE_DIR
+              value: /var/lib/awx-fixture
+          ports:
+            - name: ssh
+              containerPort: 22
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: ssh-authorized-keys
+              mountPath: /run/secrets/awx-fixture
+              readOnly: true
+            - name: fixture-state
+              mountPath: /var/lib/awx-fixture
+      volumes:
+        - name: ssh-authorized-keys
+          secret:
+            secretName: awx-fixture-ssh
+            optional: false
+            items:
+              - key: authorized_keys
+                path: authorized_keys
+                mode: 0400
+        - name: fixture-state
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-server
+  labels:
+    app.kubernetes.io/name: awx-fixture
+    app.kubernetes.io/component: node
+    app.kubernetes.io/part-of: lazarus-e2e
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: awx-fixture
+    app.kubernetes.io/component: node
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: ssh
+      protocol: TCP

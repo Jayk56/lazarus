@@ -1,0 +1,54 @@
+name: Source validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Go, Helm, API, YAML, and Ansible
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.21.0
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation_venv="${RUNNER_TEMP}/lazarus-validation-venv"
+          python3 -m venv "${validation_venv}"
+          "${validation_venv}/bin/python" -m pip install --disable-pip-version-check \
+            -r scripts/validation-requirements.txt
+          GOBIN="${validation_venv}/bin" \
+            go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "${validation_venv}/bin" >> "${GITHUB_PATH}"
+
+      - name: Run the source gate
+        env:
+          GOCACHE: ${{ runner.temp }}/go-build-cache
+        run: make validate-source

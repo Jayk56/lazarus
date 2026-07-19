@@ -1,0 +1,32 @@
+---
+- name: Configure the deterministic Lazarus AWX E2E workflow
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - workflow.yml
+  vars:
+    aap_hostname: "{{ lookup('env', 'AAP_HOSTNAME') }}"
+    aap_token: "{{ lookup('env', 'AAP_TOKEN') }}"
+    aap_validate_certs: true
+    aap_configuration_secure_logging: true
+  pre_tasks:
+    - name: Require Controller connection and named prerequisites
+      no_log: true
+      ansible.builtin.assert:
+        that:
+          - aap_hostname | length > 0
+          - aap_token | length > 0
+          - awx_e2e_organization | length > 0
+          - awx_e2e_project | length > 0
+          - awx_e2e_inventory | length > 0
+          - awx_e2e_execution_environment | length > 0
+          - awx_e2e_api_credential | length > 0
+          - awx_e2e_admin_credential | length > 0
+          - awx_e2e_machine_credential | length > 0
+        fail_msg: >-
+          Supply AAP_HOSTNAME/AAP_TOKEN and set the existing project, inventory,
+          execution environment, and credentials.
+  roles:
+    - infra.aap_configuration.controller_job_templates
+    - infra.aap_configuration.controller_workflow_job_templates

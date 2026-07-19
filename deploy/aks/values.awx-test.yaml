@@ -1,0 +1,7 @@
+# Add this file after values.test.yaml when AWX runs in the `awx` namespace.
+# The service remains private; only Lazarus's Helm test pod and AWX may call it.
+networkPolicy:
+  additionalIngressPeers:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: awx

@@ -1,0 +1,24 @@
+---
+all:
+  children:
+    awx_fixture:
+      children:
+        node_fixture:
+          hosts:
+            node-server:
+              ansible_host: node-server.awx-fixture.svc
+              fixture_profile: node
+        dmgr_fixture:
+          hosts:
+            dmgr-server:
+              ansible_host: dmgr-server.awx-fixture.svc
+              fixture_profile: dmgr
+  vars:
+    ansible_user: awx-fixture
+    ansible_python_interpreter: /usr/bin/python3
+    # The disposable pods generate new host keys whenever they are recreated.
+    # Production inventories should verify stable host keys instead.
+    ansible_ssh_common_args: >-
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    # Supply the SSH private key through an AWX Machine credential. Do not add
+    # passwords, private keys, cluster addresses, or tokens to this inventory.

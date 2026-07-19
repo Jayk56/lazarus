@@ -1,0 +1,14 @@
+# Lazarus must be scaled to zero and its pod fully terminated before applying
+# this storage-level snapshot. Replace the example names before use.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: lazarus-manual-YYYYMMDDTHHMMSSZ
+  namespace: lazarus
+  labels:
+    app.kubernetes.io/name: lazarus
+    app.kubernetes.io/component: backup
+spec:
+  volumeSnapshotClassName: REPLACE_WITH_RETAIN_SNAPSHOT_CLASS
+  source:
+    persistentVolumeClaimName: lazarus

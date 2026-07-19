@@ -1,0 +1,160 @@
+---
+- name: Assert the deterministic injected failure before administrator recovery
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../fixture.yml
+  vars:
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+  tasks:
+    - name: Require the original run and immutable discovery artifact
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - awx_e2e_capture_document is defined
+          - awx_e2e_capture_document is mapping
+
+    - name: Read the failed maintenance aggregate
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: failed_aggregate
+      changed_when: false
+
+    - name: Check the exact failed maintenance boundary
+      ansible.builtin.assert:
+        that:
+          - failed_aggregate.json.maintenance.id == maintenance_id
+          - failed_aggregate.json.maintenance.state == fixture_failure_expected.maintenance_state
+          - failed_aggregate.json.maintenance.version == fixture_failure_expected.maintenance_version
+          - failed_aggregate.etag == fixture_failure_expected.maintenance_etag
+          - failed_aggregate.json.targets | length == fixture_targets | length
+
+    - name: Check every partial target state and version
+      vars:
+        expected_spec: "{{ fixture_targets | selectattr('target_id', 'equalto', item.id) | first }}"
+        expected_state: >-
+          {{ 'stopped' if item.id == 'web-01'
+             else 'stopping' if item.id == 'web-02'
+             else 'stopped' if expected_spec.initial_state == 'stopped'
+             else 'captured' }}
+        expected_version: >-
+          {{ 5 if item.id == 'web-01'
+             else 4 if item.id == 'web-02'
+             else 3 }}
+      ansible.builtin.assert:
+        that:
+          - item.original_state == expected_spec.initial_state
+          - item.state == expected_state
+          - item.version == (expected_version | int)
+      loop: "{{ failed_aggregate.json.targets }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Read the immutable capture from Lazarus
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/capture"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: failed_capture
+      changed_when: false
+
+    - name: Require the exact unchanged discovery capture
+      ansible.builtin.assert:
+        that:
+          - failed_capture.json.payload == awx_e2e_capture_document
+          - failed_capture.json.payload.targets | length == 10
+          - failed_capture.json.sha256 is match('^[0-9a-f]{64}$')
+
+    - name: Read the complete partial event history
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/events?maintenance_id={{ maintenance_id | urlencode }}&limit=200"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: failed_events
+      changed_when: false
+
+    - name: Derive partial event categories
+      ansible.builtin.set_fact:
+        failed_maintenance_events: >-
+          {{ failed_events.json['items'] | selectattr('resource_type', 'equalto', 'maintenance') | list }}
+        failed_transition_events: >-
+          {{ failed_events.json['items'] | selectattr('type', 'equalto', 'target.transitioned') | list }}
+        failed_observation_events: >-
+          {{ failed_events.json['items'] | selectattr('type', 'equalto', 'target.observed') | list }}
+        failed_reopen_events: >-
+          {{ failed_events.json['items'] | selectattr('type', 'equalto', 'maintenance.reopened') | list }}
+        failed_terminal_events: >-
+          {{ failed_events.json['items'] | selectattr('to_state', 'defined') |
+             selectattr('to_state', 'equalto', 'failed') | list }}
+
+    - name: Start the partial target-transition order
+      ansible.builtin.set_fact:
+        failed_transition_order: []
+
+    - name: Materialize partial target-transition order from newest to oldest
+      ansible.builtin.set_fact:
+        failed_transition_order: >-
+          {{ failed_transition_order + [item.target_id ~ ':' ~ item.to_state] }}
+      loop: "{{ failed_transition_events }}"
+      loop_control:
+        label: "{{ item.target_id }} -> {{ item.to_state }}"
+
+    - name: Check the exact partial audit boundary
+      ansible.builtin.assert:
+        that:
+          - failed_events.json.next_cursor is not defined
+          - failed_events.json['items'] | length == fixture_failure_expected.event_count
+          - failed_maintenance_events | length == fixture_failure_expected.maintenance_event_count
+          - failed_transition_events | length == fixture_failure_expected.target_transition_count
+          - failed_observation_events | length == fixture_failure_expected.observation_count
+          - failed_reopen_events | length == 0
+          - failed_terminal_events | length == 1
+          - failed_terminal_events[0].type == 'maintenance.transitioned'
+          - failed_terminal_events[0].resource_type == 'maintenance'
+          - failed_terminal_events[0].resource_id == maintenance_id
+          - failed_terminal_events[0].maintenance_id == maintenance_id
+          - failed_terminal_events[0].from_state == 'stopping'
+          - failed_terminal_events[0].to_state == 'failed'
+          - failed_terminal_events[0].from_version == 6
+          - failed_terminal_events[0].to_version == 7
+          - failed_terminal_events[0].aggregate_version == 7
+          - failed_terminal_events[0].role == 'operator'
+          - failed_terminal_events[0].request_id is match('^awx-e2e-maintenance-')
+          - failed_transition_order == fixture_failure_expected_transition_order
+
+    - name: Read every external fixture process after failure
+      delegate_to: "{{ item.fixture_host }}"
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fixture-service, get, "{{ item.service_name }}"]
+      loop: "{{ fixture_targets }}"
+      loop_control:
+        label: "{{ item.target_id }}"
+      register: failed_external_states
+      changed_when: false
+
+    - name: Check only web-01 was externally stopped
+      vars:
+        expected_external_state: >-
+          {{ 'stopped' if item.item.target_id == 'web-01' else item.item.initial_state }}
+      ansible.builtin.assert:
+        that: item.stdout | trim == expected_external_state
+        fail_msg: "Unexpected partial external state for {{ item.item.target_id }}."
+      loop: "{{ failed_external_states.results }}"
+      loop_control:
+        label: "{{ item.item.target_id }}"

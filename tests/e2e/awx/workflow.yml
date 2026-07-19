@@ -1,0 +1,363 @@
+---
+# Shared names and graph for both bootstrap paths. configure-awx.yml creates the
+# stock-AWX objects; configure.yml expects equivalent AAP objects to exist.
+# Credentials are referenced by name only and are never stored here.
+awx_e2e_organization: Default
+awx_e2e_project: Lazarus automation
+awx_e2e_inventory: Lazarus AWX E2E fixture
+awx_e2e_execution_environment: Default execution environment
+awx_e2e_awx_execution_environment: Lazarus AWX EE (24.6.1)
+awx_e2e_awx_execution_environment_image: quay.io/ansible/awx-ee:24.6.1
+awx_e2e_inventory_source: Lazarus AWX E2E fixture SCM
+awx_e2e_api_credential_type: Lazarus API token
+awx_e2e_admin_credential_type: Lazarus administrator token
+awx_e2e_api_credential: Lazarus E2E API token
+awx_e2e_admin_credential: Lazarus E2E administrator token
+awx_e2e_machine_credential: Lazarus E2E SSH key
+awx_e2e_workflow_name: Lazarus deterministic AWX E2E
+awx_e2e_recovery_workflow_name: Lazarus deterministic AWX failure recovery E2E
+
+controller_templates:
+  - name: Lazarus E2E - seed fixture
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/seed.yml
+    credentials: ["{{ awx_e2e_machine_credential }}"]
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - create
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/create.yml
+    credentials: ["{{ awx_e2e_api_credential }}"]
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - discover
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/discover.yml
+    credentials: ["{{ awx_e2e_machine_credential }}"]
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - capture
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/capture.yml
+    credentials: ["{{ awx_e2e_api_credential }}"]
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - maintenance state
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/maintenance.yml
+    credentials: ["{{ awx_e2e_api_credential }}"]
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - target batch
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/target_batch.yml
+    credentials:
+      - "{{ awx_e2e_api_credential }}"
+      - "{{ awx_e2e_machine_credential }}"
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - assert
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/assert.yml
+    credentials:
+      - "{{ awx_e2e_api_credential }}"
+      - "{{ awx_e2e_machine_credential }}"
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - assert injected failure
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/failure_assert.yml
+    credentials:
+      - "{{ awx_e2e_api_credential }}"
+      - "{{ awx_e2e_machine_credential }}"
+    ask_variables_on_launch: true
+  - name: Lazarus E2E - reopen failed maintenance
+    organization: "{{ awx_e2e_organization }}"
+    project: "{{ awx_e2e_project }}"
+    inventory: "{{ awx_e2e_inventory }}"
+    execution_environment: "{{ awx_e2e_execution_environment }}"
+    playbook: tests/e2e/awx/playbooks/reopen.yml
+    credentials: ["{{ awx_e2e_admin_credential }}"]
+    ask_variables_on_launch: true
+
+controller_workflows:
+  - name: "{{ awx_e2e_workflow_name }}"
+    organization: "{{ awx_e2e_organization }}"
+    allow_simultaneous: false
+    survey_enabled: true
+    survey_spec:
+      name: Deterministic Lazarus E2E inputs
+      description: Test-only run identity and HTTPS API endpoint.
+      spec:
+        - question_name: Maintenance ID
+          question_description: Use a unique ID for this isolated E2E run.
+          variable: maintenance_id
+          type: text
+          required: true
+          min: 1
+          max: 200
+        - question_name: Lazarus URL
+          question_description: HTTPS Lazarus API root ending in /api/v1.
+          variable: lazarus_url
+          type: text
+          required: true
+          min: 12
+          max: 512
+        - question_name: Change ticket
+          question_description: Synthetic identifier for this test run.
+          variable: change_ticket
+          type: text
+          required: true
+          default: CHG-AWX-E2E
+          min: 1
+          max: 200
+        - question_name: Workflow version
+          question_description: Deterministic fixture contract version.
+          variable: workflow_version
+          type: text
+          required: true
+          default: deterministic-awx-e2e-v1
+          min: 1
+          max: 100
+    simplified_workflow_nodes:
+      - identifier: seed
+        unified_job_template: Lazarus E2E - seed fixture
+        success_nodes: [create]
+      - identifier: create
+        unified_job_template: Lazarus E2E - create
+        success_nodes: [discover]
+      - identifier: discover
+        unified_job_template: Lazarus E2E - discover
+        success_nodes: [capture]
+        failure_nodes: [mark_failed]
+      - identifier: capture
+        unified_job_template: Lazarus E2E - capture
+        success_nodes: [maintenance_stopping]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_stopping
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: stopping}
+        success_nodes: [stop_app_services]
+        failure_nodes: [mark_failed]
+      - identifier: stop_app_services
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: stop_app_services}
+        success_nodes: [stop_nodeagent]
+        failure_nodes: [mark_failed]
+      - identifier: stop_nodeagent
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: stop_nodeagent}
+        success_nodes: [stop_dmgr]
+        failure_nodes: [mark_failed]
+      - identifier: stop_dmgr
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: stop_dmgr}
+        success_nodes: [maintenance_stopped]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_stopped
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: stopped}
+        success_nodes: [maintenance_waiting]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_waiting
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: waiting}
+        success_nodes: [maintenance_starting]
+        failure_nodes: [mark_failed]
+      - identifier: maintenance_starting
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: starting}
+        success_nodes: [start_dmgr]
+        failure_nodes: [mark_failed]
+      - identifier: start_dmgr
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: start_dmgr}
+        success_nodes: [start_nodeagent]
+        failure_nodes: [mark_failed]
+      - identifier: start_nodeagent
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: start_nodeagent}
+        success_nodes: [start_app_services]
+        failure_nodes: [mark_failed]
+      - identifier: start_app_services
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: start_app_services}
+        success_nodes: [complete]
+        failure_nodes: [mark_failed]
+      - identifier: complete
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: completed}
+        success_nodes: [assert_contract]
+        failure_nodes: [mark_failed]
+      - identifier: assert_contract
+        unified_job_template: Lazarus E2E - assert
+      - identifier: mark_failed
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: failed}
+
+  - name: "{{ awx_e2e_recovery_workflow_name }}"
+    organization: "{{ awx_e2e_organization }}"
+    allow_simultaneous: false
+    survey_enabled: true
+    survey_spec:
+      name: Deterministic Lazarus failure recovery inputs
+      description: A fresh run identity, HTTPS API endpoint, and recovery justification.
+      spec:
+        - question_name: Maintenance ID
+          question_description: Use a fresh unique ID for this failure-recovery run.
+          variable: maintenance_id
+          type: text
+          required: true
+          min: 1
+          max: 200
+        - question_name: Lazarus URL
+          question_description: HTTPS Lazarus API root ending in /api/v1.
+          variable: lazarus_url
+          type: text
+          required: true
+          min: 12
+          max: 512
+        - question_name: Change ticket
+          question_description: Synthetic identifier for this test run.
+          variable: change_ticket
+          type: text
+          required: true
+          default: CHG-AWX-E2E-RECOVERY
+          min: 1
+          max: 200
+        - question_name: Workflow version
+          question_description: Deterministic recovery fixture contract version.
+          variable: workflow_version
+          type: text
+          required: true
+          default: deterministic-awx-e2e-recovery-v1
+          min: 1
+          max: 100
+        - question_name: Recovery justification
+          question_description: Non-empty administrator audit reason for reopening this failed run.
+          variable: recovery_justification
+          type: text
+          required: true
+          default: CHG-AWX-E2E recover deterministic web-02 fixture failure
+          min: 1
+          max: 4096
+    simplified_workflow_nodes:
+      - identifier: seed
+        unified_job_template: Lazarus E2E - seed fixture
+        success_nodes: [create]
+      - identifier: create
+        unified_job_template: Lazarus E2E - create
+        success_nodes: [discover]
+      - identifier: discover
+        unified_job_template: Lazarus E2E - discover
+        success_nodes: [capture]
+      - identifier: capture
+        unified_job_template: Lazarus E2E - capture
+        success_nodes: [maintenance_stopping]
+        failure_nodes: [mark_failed_pre_injection]
+      - identifier: maintenance_stopping
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data:
+          maintenance_state: stopping
+          maintenance_request_scope: failure-recovery-initial
+        success_nodes: [stop_app_services_injected]
+        failure_nodes: [mark_failed_pre_injection]
+      - identifier: mark_failed_pre_injection
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data:
+          maintenance_state: failed
+          maintenance_request_scope: failure-recovery-pre-injection-failed
+      - identifier: stop_app_services_injected
+        unified_job_template: Lazarus E2E - target batch
+        extra_data:
+          fixture_group: stop_app_services
+          fixture_failure_target_id: web-02
+        success_nodes: [assert_failed]
+        failure_nodes: [mark_failed_initial]
+      - identifier: mark_failed_initial
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data:
+          maintenance_state: failed
+          maintenance_request_scope: failure-recovery-initial-failed
+        success_nodes: [assert_failed]
+      - identifier: assert_failed
+        unified_job_template: Lazarus E2E - assert injected failure
+        success_nodes: [reopen]
+      - identifier: reopen
+        unified_job_template: Lazarus E2E - reopen failed maintenance
+        success_nodes: [resume_stop_app_services]
+      - identifier: resume_stop_app_services
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: stop_app_services}
+        success_nodes: [stop_nodeagent]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: stop_nodeagent
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: stop_nodeagent}
+        success_nodes: [stop_dmgr]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: stop_dmgr
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: stop_dmgr}
+        success_nodes: [maintenance_stopped]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: maintenance_stopped
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: stopped}
+        success_nodes: [maintenance_waiting]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: maintenance_waiting
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: waiting}
+        success_nodes: [maintenance_starting]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: maintenance_starting
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: starting}
+        success_nodes: [start_dmgr]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: start_dmgr
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: start_dmgr}
+        success_nodes: [start_nodeagent]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: start_nodeagent
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: start_nodeagent}
+        success_nodes: [start_app_services]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: start_app_services
+        unified_job_template: Lazarus E2E - target batch
+        extra_data: {fixture_group: start_app_services}
+        success_nodes: [complete]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: complete
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data: {maintenance_state: completed}
+        success_nodes: [assert_recovery]
+        failure_nodes: [mark_failed_recovery]
+      - identifier: assert_recovery
+        unified_job_template: Lazarus E2E - assert
+        extra_data: {assert_profile: recovery}
+      - identifier: mark_failed_recovery
+        unified_job_template: Lazarus E2E - maintenance state
+        extra_data:
+          maintenance_state: failed
+          maintenance_request_scope: failure-recovery-terminal-failed

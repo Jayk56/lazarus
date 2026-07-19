@@ -1,0 +1,63 @@
+---
+- name: Submit only the immutable AWX discovery artifact
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+  tasks:
+    - name: Require API inputs and the discovery artifact
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - awx_e2e_capture_document is defined
+          - awx_e2e_capture_document is mapping
+        fail_msg: >-
+          The complete capture artifact from the discover workflow node is
+          required. Do not rediscover after fixture state has changed.
+
+    - name: Freeze the propagated artifact for this job
+      no_log: true
+      ansible.builtin.set_fact:
+        capture_submission: "{{ awx_e2e_capture_document }}"
+
+    - name: Check the complete deterministic capture contract
+      ansible.builtin.assert:
+        that:
+          - capture_submission.captured_by == 'deterministic-awx-e2e'
+          - capture_submission.targets | length == 10
+          - capture_submission.targets | map(attribute='target_id') | unique | length == 10
+          - item.lock_key | length > 0
+          - item.original_state in ['running', 'stopped']
+      loop: "{{ capture_submission.targets }}"
+      loop_control:
+        label: "{{ item.target_id }}"
+
+    - name: Submit the immutable artifact as JSON
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/capture"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          X-Request-ID: "awx-e2e-capture-{{ maintenance_id | hash('sha256') }}"
+        body_format: json
+        body: "{{ capture_submission }}"
+        status_code: [200, 201, 409, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: capture_result
+      retries: 3
+      delay: 2
+      until: capture_result.status not in [500, 503]
+      changed_when: capture_result.status == 201
+
+    - name: Reject immutable capture or lock conflicts
+      when: capture_result.status == 409
+      ansible.builtin.fail:
+        msg: >-
+          AWX capture artifact rejected: {{ capture_result.json.reason |
+          default(capture_result.json.error) | default('conflict') }}.
+          Preserve the discover job artifact and do not rediscover.

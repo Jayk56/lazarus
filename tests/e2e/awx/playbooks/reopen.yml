@@ -1,0 +1,94 @@
+---
+- name: Reopen the same failed maintenance with a separate administrator credential
+  hosts: localhost
+  gather_facts: false
+  vars:
+    lazarus_admin_token: "{{ lookup('env', 'LAZARUS_ADMIN_TOKEN') }}"
+    reopen_request_scope: deterministic-failure-recovery-v1
+  tasks:
+    - name: Require explicit administrator recovery inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_admin_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - recovery_justification | default('') | trim | length > 0
+          - reopen_request_scope | trim | length > 0
+
+    - name: Read the failed maintenance and exact ETag
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_admin_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: failed_maintenance
+      changed_when: false
+
+    - name: Permit only the failed state or an exact idempotent replay
+      ansible.builtin.assert:
+        that:
+          - failed_maintenance.json.maintenance.id == maintenance_id
+          - failed_maintenance.json.maintenance.state in ['failed', 'stopping']
+        fail_msg: >-
+          Recovery may only reopen this failed maintenance to stopping. Do not
+          create, seed, discover, or capture another run.
+
+    - name: Reopen the captured maintenance to stopping
+      when: failed_maintenance.json.maintenance.state == 'failed'
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ lazarus_admin_token }}"
+          If-Match: "{{ failed_maintenance.etag }}"
+          X-Request-ID: >-
+            awx-e2e-reopen-{{ (reopen_request_scope ~ '|' ~ maintenance_id ~
+            '|stopping') | hash('sha256') }}
+        body_format: json
+        body:
+          state: stopping
+          justification: "{{ recovery_justification }}"
+          detail:
+            fixture: deterministic-awx-e2e
+            recovery: injected-web-02-command-failure
+        status_code: [200, 400, 403, 409, 412, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: reopen_result
+      retries: 3
+      delay: 2
+      until: reopen_result.status not in [500, 503]
+      changed_when: reopen_result.status == 200
+
+    - name: Expose rejected reopen requests
+      when:
+        - reopen_result is defined
+        - reopen_result.status | default(200) in [400, 403, 409, 412]
+      ansible.builtin.fail:
+        msg: >-
+          Administrator reopen was rejected with HTTP
+          {{ reopen_result.status }}. Preserve the same run and capture for review.
+
+    - name: Read the maintenance after reopen
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_admin_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: reopened_maintenance
+      changed_when: false
+
+    - name: Require the exact active recovery phase
+      ansible.builtin.assert:
+        that:
+          - reopened_maintenance.json.maintenance.id == maintenance_id
+          - reopened_maintenance.json.maintenance.state == 'stopping'
+          - reopened_maintenance.json.maintenance.version == 8
+          - reopened_maintenance.etag == '"8"'

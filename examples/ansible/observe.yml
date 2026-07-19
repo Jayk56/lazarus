@@ -1,0 +1,78 @@
+---
+- name: Record a target observation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_url: "{{ lookup('env', 'LAZARUS_URL') }}"
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    maintenance_id: "{{ lookup('env', 'MAINTENANCE_ID') }}"
+    target_id: web-01
+    observation: {source: aap, check: systemd, observed_state: stopped}
+  tasks:
+    - name: Check observation inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | length > 0
+          - target_id | length > 0
+          - observation is mapping
+          - observation.check | default('') | length > 0
+
+    - name: Read the target and its ETag
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: observation_target
+      retries: 3
+      delay: 2
+      until: observation_target.status not in [500, 503]
+      changed_when: false
+
+    - name: Build a request ID for this observation
+      ansible.builtin.set_fact:
+        observation_request_id: >-
+          aap-observe-{{ ((awx_job_id | default('local') | string) ~ '|' ~
+          maintenance_id ~ '|' ~ target_id ~ '|' ~ observation_target.etag ~
+          '|' ~ observation.check) | hash('sha256') }}
+
+    - name: Save the observation
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}/observations"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          If-Match: "{{ observation_target.etag }}"
+          X-Request-ID: "{{ observation_request_id }}"
+        body_format: json
+        body: "{{ observation }}"
+        status_code: [204, 409, 412, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: observation_result
+      retries: 3
+      delay: 2
+      until: observation_result.status not in [500, 503]
+      changed_when: false
+
+    - name: Explain a reused request ID
+      when: observation_result.status == 409
+      ansible.builtin.fail:
+        msg: >-
+          Lazarus rejected this request ID because it was already used with a different observation:
+          {{ observation_result.json.reason |
+          default(observation_result.json.error) | default('conflict') }}.
+
+    - name: Stop if the target changed
+      when: observation_result.status == 412
+      ansible.builtin.fail:
+        msg: >-
+          The target ETag changed before the observation was saved. Read the
+          current maintenance phase and target, then resume the right phase.

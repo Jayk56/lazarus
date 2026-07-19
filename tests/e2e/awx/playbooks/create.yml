@@ -1,0 +1,67 @@
+---
+- name: Create the deterministic Lazarus maintenance run
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+  tasks:
+    - name: Require explicit connection and run identity
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - change_ticket | default('') | length > 0
+          - workflow_version | default('') | length > 0
+
+    - name: Create the maintenance run
+      vars:
+        create_request_id: "awx-e2e-create-{{ maintenance_id | hash('sha256') }}"
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          X-Request-ID: "{{ create_request_id }}"
+        body_format: json
+        body:
+          maintenance_id: "{{ maintenance_id }}"
+          change_ticket: "{{ change_ticket }}"
+          workflow_version: "{{ workflow_version }}"
+          metadata: {fixture: deterministic-awx-e2e}
+        status_code: [201, 409, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: create_result
+      retries: 3
+      delay: 2
+      until: create_result.status not in [500, 503]
+      changed_when: create_result.status == 201
+
+    - name: Read the existing maintenance after a conflict
+      when: create_result.status == 409
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: existing_maintenance
+      retries: 3
+      delay: 2
+      until: existing_maintenance.status not in [500, 503]
+      changed_when: false
+
+    - name: Accept only the same deterministic run
+      when: create_result.status == 409
+      ansible.builtin.assert:
+        that:
+          - existing_maintenance.json.maintenance.id == maintenance_id
+          - existing_maintenance.json.maintenance.change_ticket == change_ticket
+          - existing_maintenance.json.maintenance.workflow_version == workflow_version
+          - existing_maintenance.json.maintenance.metadata.fixture == 'deterministic-awx-e2e'
+        fail_msg: The maintenance ID belongs to a different run.

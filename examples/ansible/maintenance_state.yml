@@ -1,0 +1,122 @@
+---
+- name: Set Lazarus maintenance state
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_url: "{{ lookup('env', 'LAZARUS_URL') }}"
+    lazarus_operator_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    lazarus_admin_token: "{{ lookup('env', 'LAZARUS_ADMIN_TOKEN') }}"
+    lazarus_api_token: >-
+      {{ lazarus_admin_token if (lazarus_admin_token | length > 0)
+         else lazarus_operator_token }}
+    maintenance_id: "{{ lookup('env', 'MAINTENANCE_ID') }}"
+    maintenance_state: stopping
+    justification: ""
+    maintenance_detail: {}
+  tasks:
+    - name: Check state-change inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | length > 0
+          - lazarus_api_token | length > 0
+          - maintenance_id | length > 0
+          - maintenance_state in ['new', 'captured', 'stopping', 'stopped', 'waiting', 'starting', 'completed', 'failed', 'cancelled']
+          - maintenance_detail is mapping
+
+    - name: Read the maintenance and its ETag
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_api_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: maintenance_get
+      retries: 3
+      delay: 2
+      until: maintenance_get.status not in [500, 503]
+      changed_when: false
+
+    - name: Require admin approval to reopen a failure
+      when:
+        - maintenance_get.json.maintenance.state == 'failed'
+        - maintenance_state != 'failed'
+      ansible.builtin.assert:
+        that:
+          - lazarus_admin_token | length > 0
+          - justification | trim | length > 0
+        fail_msg: >-
+          Reopening a failed maintenance requires LAZARUS_ADMIN_TOKEN and a
+          non-empty justification. Reopen this same run; do not rediscover.
+
+    - name: Build a request ID for this maintenance version
+      when: maintenance_get.json.maintenance.state != maintenance_state
+      ansible.builtin.set_fact:
+        maintenance_request_id: >-
+          state-{{ ((awx_job_id | default('local') | string) ~ '|' ~
+          maintenance_id ~ '|' ~ maintenance_get.etag ~ '|' ~
+          maintenance_state) | hash('sha256') }}
+
+    - name: Change state with If-Match
+      when: maintenance_get.json.maintenance.state != maintenance_state
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ lazarus_api_token }}"
+          If-Match: "{{ maintenance_get.etag }}"
+          X-Request-ID: "{{ maintenance_request_id }}"
+        body_format: json
+        body: >-
+          {{ {'state': maintenance_state, 'detail': maintenance_detail}
+             | combine({'justification': justification}
+             if (justification | trim | length > 0) else {}) }}
+        status_code: [200, 400, 403, 409, 412, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: maintenance_change
+      retries: 3
+      delay: 2
+      until: maintenance_change.status not in [500, 503]
+      changed_when: maintenance_change.status == 200
+
+    - name: Read the state again after a conflict
+      when:
+        - maintenance_change is defined
+        - maintenance_change.status | default(0) == 412
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_api_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: maintenance_reconcile
+      retries: 3
+      delay: 2
+      until: maintenance_reconcile.status not in [500, 503]
+      changed_when: false
+
+    - name: Accept only the requested state
+      when:
+        - maintenance_change is defined
+        - maintenance_change.status | default(0) == 412
+      ansible.builtin.assert:
+        that: maintenance_reconcile.json.maintenance.state == maintenance_state
+        fail_msg: >-
+          Another request changed the maintenance to
+          {{ maintenance_reconcile.json.maintenance.state }}; stop for review.
+
+    - name: Explain rejected state changes
+      when:
+        - maintenance_change is defined
+        - maintenance_change.status | default(200) in [400, 403, 409]
+      ansible.builtin.fail:
+        msg: >-
+          Lazarus rejected state {{ maintenance_state }}:
+          {{ maintenance_change.json.reason |
+          default(maintenance_change.json.error) | default('request rejected') }}.

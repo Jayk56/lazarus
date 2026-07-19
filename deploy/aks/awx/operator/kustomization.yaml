@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: awx
+resources:
+  - github.com/ansible/awx-operator/config/default?ref=2.19.1
+images:
+  - name: quay.io/ansible/awx-operator
+    newName: quay.io/ansible/awx-operator
+    digest: sha256:7302e0c8e5a79c11275848b36c63c61d8e7487840164c109b7cda9aa93456901
+patches:
+  # The pilot does not scrape operator metrics. Remove the optional proxy whose
+  # upstream 2.19.1 manifest points to a retired GCR image.
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: awx-operator-controller-manager
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0

@@ -1,0 +1,257 @@
+---
+- name: Bootstrap the deterministic fixture in stock AWX 24.6.1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - workflow.yml
+  vars:
+    awx_controller_host: "{{ lookup('env', 'CONTROLLER_HOST') }}"
+    awx_controller_token: "{{ lookup('env', 'CONTROLLER_OAUTH_TOKEN') }}"
+    awx_controller_validate_certs: >-
+      {{ lookup('env', 'CONTROLLER_VERIFY_SSL') | default('true', true) | bool }}
+    awx_project_scm_url: "{{ lookup('env', 'AWX_PROJECT_SCM_URL') }}"
+    awx_project_scm_branch: "{{ lookup('env', 'AWX_PROJECT_SCM_BRANCH') }}"
+    lazarus_api_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    lazarus_admin_token: "{{ lookup('env', 'LAZARUS_ADMIN_TOKEN') }}"
+    awx_machine_username: >-
+      {{ lookup('env', 'AWX_MACHINE_USERNAME') | default('awx-fixture', true) }}
+    awx_machine_ssh_key_from_env: "{{ lookup('env', 'AWX_MACHINE_SSH_KEY') }}"
+    awx_machine_ssh_key_file: "{{ lookup('env', 'AWX_MACHINE_SSH_KEY_FILE') }}"
+  module_defaults:
+    group/awx.awx.controller:
+      controller_host: "{{ awx_controller_host }}"
+      controller_oauthtoken: "{{ awx_controller_token }}"
+      validate_certs: "{{ awx_controller_validate_certs }}"
+  pre_tasks:
+    - name: Require explicit AWX, SCM, API, and Machine credential inputs
+      no_log: true
+      ansible.builtin.assert:
+        that:
+          - awx_controller_host | length > 0
+          - awx_controller_token | length > 0
+          - awx_project_scm_url | length > 0
+          - awx_project_scm_branch | length > 0
+          - lazarus_api_token | length > 0
+          - lazarus_admin_token | length > 0
+          - lazarus_admin_token != lazarus_api_token
+          - awx_machine_username | length > 0
+          - (awx_machine_ssh_key_from_env | length > 0) != (awx_machine_ssh_key_file | length > 0)
+        fail_msg: >-
+          Set CONTROLLER_HOST, CONTROLLER_OAUTH_TOKEN, AWX_PROJECT_SCM_URL,
+          AWX_PROJECT_SCM_BRANCH, distinct LAZARUS_TOKEN and
+          LAZARUS_ADMIN_TOKEN values, and exactly one of AWX_MACHINE_SSH_KEY or
+          AWX_MACHINE_SSH_KEY_FILE.
+
+    - name: Use private-key material supplied directly by the environment
+      when: awx_machine_ssh_key_from_env | length > 0
+      no_log: true
+      ansible.builtin.set_fact:
+        awx_machine_ssh_key: "{{ awx_machine_ssh_key_from_env }}"
+
+    - name: Read private-key material from the explicit local file
+      when: awx_machine_ssh_key_file | length > 0
+      no_log: true
+      ansible.builtin.set_fact:
+        awx_machine_ssh_key: "{{ lookup('file', awx_machine_ssh_key_file) }}"
+
+    - name: Require non-empty private-key material
+      no_log: true
+      ansible.builtin.assert:
+        that:
+          - awx_machine_ssh_key is defined
+          - awx_machine_ssh_key | default('') | length > 0
+
+  tasks:
+    # AWX's create_preload_data setting is installation-time state. This
+    # bootstrap intentionally creates no Demo inventory, project, credential,
+    # or template. The Default organization is created explicitly below.
+    - name: Ensure the Default organization exists without demo preload objects
+      awx.awx.organization:
+        name: "{{ awx_e2e_organization }}"
+        description: Deterministic Lazarus AWX end-to-end pilot
+        state: present
+
+    - name: Ensure the pinned stock AWX execution environment exists
+      awx.awx.execution_environment:
+        name: "{{ awx_e2e_awx_execution_environment }}"
+        description: Stock execution environment matching AWX 24.6.1
+        image: "{{ awx_e2e_awx_execution_environment_image }}"
+        organization: "{{ awx_e2e_organization }}"
+        pull: missing
+        state: present
+
+    - name: Ensure the SCM project exists and tracks the explicit branch
+      no_log: true
+      awx.awx.project:
+        name: "{{ awx_e2e_project }}"
+        description: Deterministic Lazarus AWX end-to-end fixture
+        organization: "{{ awx_e2e_organization }}"
+        default_environment: "{{ awx_e2e_awx_execution_environment }}"
+        scm_type: git
+        scm_url: "{{ awx_project_scm_url }}"
+        scm_branch: "{{ awx_project_scm_branch }}"
+        scm_clean: true
+        scm_update_on_launch: true
+        scm_update_cache_timeout: 0
+        update_project: true
+        allow_override: false
+        wait: true
+        state: present
+
+    - name: Ensure the fixture inventory exists
+      awx.awx.inventory:
+        name: "{{ awx_e2e_inventory }}"
+        description: Disposable deterministic SSH fixture hosts
+        organization: "{{ awx_e2e_organization }}"
+        state: present
+
+    - name: Ensure the project-backed fixture inventory source exists
+      awx.awx.inventory_source:
+        name: "{{ awx_e2e_inventory_source }}"
+        description: Inventory imported from the Lazarus fixture project
+        organization: "{{ awx_e2e_organization }}"
+        inventory: "{{ awx_e2e_inventory }}"
+        source: scm
+        source_project: "{{ awx_e2e_project }}"
+        source_path: tests/e2e/awx/inventory.example.yml
+        execution_environment: "{{ awx_e2e_awx_execution_environment }}"
+        overwrite: true
+        overwrite_vars: true
+        update_on_launch: true
+        update_cache_timeout: 0
+        state: present
+
+    - name: Synchronize the fixture inventory before creating templates
+      awx.awx.inventory_source_update:
+        name: "{{ awx_e2e_inventory_source }}"
+        organization: "{{ awx_e2e_organization }}"
+        inventory: "{{ awx_e2e_inventory }}"
+        wait: true
+        interval: 2
+        timeout: 300
+
+    - name: Ensure the Lazarus token credential type exists
+      awx.awx.credential_type:
+        name: "{{ awx_e2e_api_credential_type }}"
+        description: Injects the Lazarus bearer token only as LAZARUS_TOKEN
+        kind: cloud
+        inputs:
+          fields:
+            - id: lazarus_token
+              label: Lazarus API token
+              type: string
+              secret: true
+          required: [lazarus_token]
+        injectors:
+          env:
+            LAZARUS_TOKEN: "{% raw %}{{ lazarus_token }}{% endraw %}"
+        state: present
+
+    - name: Ensure the Lazarus API credential exists
+      no_log: true
+      awx.awx.credential:
+        name: "{{ awx_e2e_api_credential }}"
+        description: Test-only Lazarus API credential
+        organization: "{{ awx_e2e_organization }}"
+        credential_type: "{{ awx_e2e_api_credential_type }}"
+        inputs:
+          lazarus_token: "{{ lazarus_api_token }}"
+        state: present
+
+    - name: Ensure the separate Lazarus administrator credential type exists
+      awx.awx.credential_type:
+        name: "{{ awx_e2e_admin_credential_type }}"
+        description: Injects the least-privilege recovery token only as LAZARUS_ADMIN_TOKEN
+        kind: cloud
+        inputs:
+          fields:
+            - id: lazarus_admin_token
+              label: Lazarus administrator token
+              type: string
+              secret: true
+          required: [lazarus_admin_token]
+        injectors:
+          env:
+            LAZARUS_ADMIN_TOKEN: "{% raw %}{{ lazarus_admin_token }}{% endraw %}"
+        state: present
+
+    - name: Ensure the separate Lazarus administrator credential exists
+      no_log: true
+      awx.awx.credential:
+        name: "{{ awx_e2e_admin_credential }}"
+        description: Test-only administrator credential for failed-run reopen
+        organization: "{{ awx_e2e_organization }}"
+        credential_type: "{{ awx_e2e_admin_credential_type }}"
+        inputs:
+          lazarus_admin_token: "{{ lazarus_admin_token }}"
+        state: present
+
+    - name: Ensure the fixture Machine credential exists
+      no_log: true
+      awx.awx.credential:
+        name: "{{ awx_e2e_machine_credential }}"
+        description: Test-only SSH key for the disposable fixture hosts
+        organization: "{{ awx_e2e_organization }}"
+        credential_type: Machine
+        inputs:
+          username: "{{ awx_machine_username }}"
+          ssh_key_data: "{{ awx_machine_ssh_key }}"
+        state: present
+
+    - name: Ensure the nine fixture job templates exist
+      awx.awx.job_template:
+        name: "{{ item.name }}"
+        organization: "{{ awx_e2e_organization }}"
+        project: "{{ awx_e2e_project }}"
+        inventory: "{{ awx_e2e_inventory }}"
+        execution_environment: "{{ awx_e2e_awx_execution_environment }}"
+        playbook: "{{ item.playbook }}"
+        credentials: "{{ item.credentials }}"
+        job_type: run
+        ask_variables_on_launch: true
+        allow_simultaneous: false
+        state: present
+      loop: "{{ controller_templates }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Ensure both workflows and their launch surveys exist
+      awx.awx.workflow_job_template:
+        name: "{{ item.name }}"
+        description: Deterministic Lazarus AWX end-to-end pilot
+        organization: "{{ awx_e2e_organization }}"
+        allow_simultaneous: "{{ item.allow_simultaneous }}"
+        ask_variables_on_launch: false
+        survey_enabled: "{{ item.survey_enabled }}"
+        survey_spec: "{{ item.survey_spec }}"
+        state: present
+      loop: "{{ controller_workflows }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Ensure every workflow node exists before linking it
+      awx.awx.workflow_job_template_node:
+        identifier: "{{ item.1.identifier }}"
+        workflow_job_template: "{{ item.0.name }}"
+        organization: "{{ awx_e2e_organization }}"
+        lookup_organization: "{{ awx_e2e_organization }}"
+        unified_job_template: "{{ item.1.unified_job_template }}"
+        extra_data: "{{ item.1.extra_data | default({}) }}"
+        state: present
+      loop: "{{ query('ansible.builtin.subelements', controller_workflows, 'simplified_workflow_nodes') }}"
+      loop_control:
+        label: "{{ item.0.name }} / {{ item.1.identifier }}"
+
+    - name: Enforce every exact workflow success and failure edge
+      awx.awx.workflow_job_template_node:
+        identifier: "{{ item.1.identifier }}"
+        workflow_job_template: "{{ item.0.name }}"
+        organization: "{{ awx_e2e_organization }}"
+        success_nodes: "{{ item.1.success_nodes | default([]) }}"
+        failure_nodes: "{{ item.1.failure_nodes | default([]) }}"
+        always_nodes: []
+        state: present
+      loop: "{{ query('ansible.builtin.subelements', controller_workflows, 'simplified_workflow_nodes') }}"
+      loop_control:
+        label: "{{ item.0.name }} / {{ item.1.identifier }}"

@@ -1,0 +1,73 @@
+---
+- name: Create a Lazarus maintenance run
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # AAP supplies lazarus_url; local runs use LAZARUS_URL.
+    lazarus_url: "{{ lookup('env', 'LAZARUS_URL') }}"
+    # AAP supplies this token through a protected credential.
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    maintenance_id: "{{ lookup('env', 'MAINTENANCE_ID') }}"
+    change_ticket: "CHG-CHANGE-ME"
+    workflow_version: "example-workflow"
+  tasks:
+    - name: Check required inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | length > 0
+          - change_ticket | length > 0
+          - change_ticket != 'CHG-CHANGE-ME'
+          - workflow_version | length > 0
+        fail_msg: LAZARUS_URL, LAZARUS_TOKEN, MAINTENANCE_ID, change_ticket, and workflow_version are required
+
+    - name: Create maintenance with the caller's ID
+      vars:
+        create_request_id: "create-{{ maintenance_id | hash('sha256') }}"
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          X-Request-ID: "{{ create_request_id }}"
+        body_format: json
+        body:
+          maintenance_id: "{{ maintenance_id }}"
+          change_ticket: "{{ change_ticket }}"
+          workflow_version: "{{ workflow_version }}"
+        status_code: [201, 409, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: create_result
+      retries: 3
+      delay: 2
+      until: create_result.status not in [500, 503]
+      changed_when: create_result.status == 201
+
+    - name: Read the maintenance after a create conflict
+      when: create_result.status == 409
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: existing_maintenance
+      retries: 3
+      delay: 2
+      until: existing_maintenance.status not in [500, 503]
+      changed_when: false
+
+    - name: Verify the existing maintenance matches this request
+      when: create_result.status == 409
+      ansible.builtin.assert:
+        that:
+          - existing_maintenance.json.maintenance.id == maintenance_id
+          - existing_maintenance.json.maintenance.change_ticket | default('') == change_ticket
+          - existing_maintenance.json.maintenance.workflow_version | default('') == workflow_version
+        fail_msg: "This maintenance ID already has different details; choose a new ID."

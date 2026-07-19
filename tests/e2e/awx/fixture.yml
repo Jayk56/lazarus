@@ -1,0 +1,112 @@
+---
+fixture_kind: awx-fixture-process
+fixture_targets:
+  - {target_id: web-01, service_name: web01, fixture_host: node-server, initial_state: running}
+  - {target_id: web-02, service_name: web02, fixture_host: node-server, initial_state: running}
+  - {target_id: web-03, service_name: web03, fixture_host: node-server, initial_state: running}
+  - {target_id: web-04, service_name: web04, fixture_host: node-server, initial_state: stopped}
+  - {target_id: web-05, service_name: web05, fixture_host: node-server, initial_state: stopped}
+  - {target_id: service-01, service_name: service01, fixture_host: node-server, initial_state: running}
+  - {target_id: service-02, service_name: service02, fixture_host: node-server, initial_state: running}
+  - {target_id: service-03, service_name: service03, fixture_host: node-server, initial_state: running}
+  - {target_id: nodeagent, service_name: nodeagent, fixture_host: node-server, initial_state: running}
+  - {target_id: dmgr, service_name: dmgr, fixture_host: dmgr-server, initial_state: running}
+
+fixture_stop_app_services:
+  - web-01
+  - web-02
+  - web-03
+  - service-01
+  - service-02
+  - service-03
+fixture_stop_nodeagent: [nodeagent]
+fixture_stop_dmgr: [dmgr]
+
+fixture_start_dmgr: [dmgr]
+fixture_start_nodeagent: [nodeagent]
+fixture_start_app_services:
+  - service-03
+  - service-02
+  - service-01
+  - web-03
+  - web-02
+  - web-01
+
+fixture_expected_profiles:
+  happy:
+    maintenance_state: completed
+    maintenance_version: 39
+    maintenance_etag: '"39"'
+    running_target_state: healthy
+    running_target_version: 10
+    stopped_target_state: stopped
+    stopped_target_version: 6
+    event_count: 55
+    maintenance_event_count: 7
+    target_transition_count: 32
+    observation_count: 16
+    reopened_event_count: 0
+  recovery:
+    maintenance_state: completed
+    maintenance_version: 41
+    maintenance_etag: '"41"'
+    running_target_state: healthy
+    running_target_version: 12
+    stopped_target_state: stopped
+    stopped_target_version: 8
+    event_count: 57
+    maintenance_event_count: 9
+    target_transition_count: 32
+    observation_count: 16
+    reopened_event_count: 1
+
+fixture_failure_expected:
+  maintenance_state: failed
+  maintenance_version: 7
+  maintenance_etag: '"7"'
+  event_count: 8
+  maintenance_event_count: 4
+  target_transition_count: 3
+  observation_count: 1
+
+# GET /events returns newest first at the injected failure boundary.
+fixture_failure_expected_transition_order:
+  - web-02:stopping
+  - web-01:stopped
+  - web-01:stopping
+
+# GET /events returns newest first. This proves that each same-lock batch was
+# serialized in the declared stop order and reverse start order.
+fixture_expected_transition_order:
+  - web-01:healthy
+  - web-01:starting
+  - web-02:healthy
+  - web-02:starting
+  - web-03:healthy
+  - web-03:starting
+  - service-01:healthy
+  - service-01:starting
+  - service-02:healthy
+  - service-02:starting
+  - service-03:healthy
+  - service-03:starting
+  - nodeagent:healthy
+  - nodeagent:starting
+  - dmgr:healthy
+  - dmgr:starting
+  - dmgr:stopped
+  - dmgr:stopping
+  - nodeagent:stopped
+  - nodeagent:stopping
+  - service-03:stopped
+  - service-03:stopping
+  - service-02:stopped
+  - service-02:stopping
+  - service-01:stopped
+  - service-01:stopping
+  - web-03:stopped
+  - web-03:stopping
+  - web-02:stopped
+  - web-02:stopping
+  - web-01:stopped
+  - web-01:stopping

@@ -1,0 +1,92 @@
+---
+- name: Transition the deterministic maintenance lifecycle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    maintenance_state: stopping
+    maintenance_request_scope: standard
+  tasks:
+    - name: Check maintenance transition inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - maintenance_state in ['stopping', 'stopped', 'waiting', 'starting', 'completed', 'failed']
+          - maintenance_request_scope | trim | length > 0
+
+    - name: Read the aggregate and exact ETag
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: [200, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: maintenance_get
+      retries: 3
+      delay: 2
+      until: maintenance_get.status not in [500, 503]
+      changed_when: false
+
+    - name: Change the maintenance with the exact ETag
+      when: maintenance_get.json.maintenance.state != maintenance_state
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: PATCH
+        headers:
+          Authorization: "Bearer {{ lazarus_token }}"
+          If-Match: "{{ maintenance_get.etag }}"
+          X-Request-ID: >-
+            awx-e2e-maintenance-{{ (maintenance_request_scope ~ '|' ~
+            maintenance_id ~ '|' ~ maintenance_state) | hash('sha256') }}
+        body_format: json
+        body:
+          state: "{{ maintenance_state }}"
+          detail:
+            fixture: deterministic-awx-e2e
+            workflow_phase: "{{ maintenance_state }}"
+        status_code: [200, 400, 403, 409, 412, 500, 503]
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: maintenance_change
+      retries: 3
+      delay: 2
+      until: maintenance_change.status not in [500, 503]
+      changed_when: maintenance_change.status == 200
+
+    - name: Read after an ETag race
+      when:
+        - maintenance_change is defined
+        - maintenance_change.status | default(0) == 412
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: maintenance_reconcile
+      changed_when: false
+
+    - name: Reconcile only an already-applied transition
+      when:
+        - maintenance_change is defined
+        - maintenance_change.status | default(0) == 412
+      ansible.builtin.assert:
+        that: maintenance_reconcile.json.maintenance.state == maintenance_state
+        fail_msg: A concurrent write changed the maintenance to a different state.
+
+    - name: Expose terminal maintenance rejections
+      when:
+        - maintenance_change is defined
+        - maintenance_change.status | default(200) in [400, 403, 409]
+      ansible.builtin.fail:
+        msg: >-
+          Lazarus rejected {{ maintenance_state }}: {{ maintenance_change.json.reason |
+          default(maintenance_change.json.error) | default('request rejected') }}.

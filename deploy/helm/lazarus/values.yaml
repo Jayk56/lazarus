@@ -1,0 +1,111 @@
+image:
+  repository: ""
+  tag: ""
+  # Production deployments should pin the exact image with sha256:...
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+auth:
+  # Existing Secret containing one JSON token record per line. Keep API
+  # credentials out of Helm values and release data.
+  existingSecret: ""
+  key: tokens
+
+persistence:
+  # See docs/architecture.md#operating-constraints before choosing storage.
+  # Set this to a tested block-backed StorageClass.
+  storageClassName: ""
+  accessMode: ReadWriteOncePod
+  size: 5Gi
+  existingClaim: ""
+  annotations:
+    helm.sh/resource-policy: keep
+
+service:
+  port: 8080
+  annotations: {}
+
+serviceTLS:
+  # When enabled without existingSecret, this uses the OpenShift service CA.
+  # Generic Kubernetes installs should leave this false or supply a TLS Secret.
+  enabled: false
+  existingSecret: ""
+  certKey: tls.crt
+  keyKey: tls.key
+  caConfigMap:
+    # Required for ServiceMonitor when a custom TLS Secret is used.
+    name: ""
+    key: ca.crt
+
+route:
+  enabled: false
+  host: ""
+  annotations: {}
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    # For re-encrypt routes, provide the CA that signed the service certificate.
+    # See docs/openshift.md for the two-step service-certificate setup.
+    destinationCACertificate: ""
+
+config:
+  # Number of complete backup pairs to keep on the Lazarus volume.
+  backupRetention: 7
+  # Never rotate a complete backup younger than this age, even during a burst.
+  backupMinAge: 24h
+  # Maximum time allowed for a response, including a synchronous backup.
+  httpWriteTimeout: 2m
+  # Shutdown cancels an unfinished backup request; published pairs remain valid.
+  shutdownTimeout: 30s
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+    ephemeral-storage: 32Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+    ephemeral-storage: 128Mi
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  # Leave unset on OpenShift so the platform assigns the group that can write
+  # to the volume. Other Kubernetes platforms may require both values.
+  fsGroup: null
+  fsGroupChangePolicy: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Allow the default 30-second graceful shutdown plus platform scheduling delay.
+terminationGracePeriodSeconds: 45
+
+probes:
+  # The default gives startup five minutes. Raise it when SQLite's startup
+  # integrity check takes longer on a production-size database.
+  startupFailureThreshold: 150
+  startupPeriodSeconds: 2
+
+networkPolicy:
+  enabled: true
+  allowOpenShiftIngress: true
+  allowOpenShiftMonitoring: false
+  # Additional namespaces or pods that may call Lazarus directly.
+  additionalIngressPeers: []
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels: {}
+
+podDisruptionBudget:
+  # Enable this to require an explicit override before a voluntary disruption,
+  # such as a node drain.
+  enabled: false
+  minAvailable: 1

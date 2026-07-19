@@ -1,0 +1,74 @@
+---
+- name: Discover deterministic fixture processes over SSH
+  hosts: awx_fixture
+  gather_facts: false
+  tasks:
+    - name: Read fixture state
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fixture-service, list, --json]
+      register: fixture_discovery_result
+      changed_when: false
+
+    - name: Save host discovery
+      ansible.builtin.set_fact:
+        fixture_discovery: "{{ fixture_discovery_result.stdout | from_json }}"
+
+- name: Materialize and publish the exact capture document
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../fixture.yml
+  tasks:
+    - name: Require a run identity and both fixture hosts
+      ansible.builtin.assert:
+        that:
+          - maintenance_id | default('') | length > 0
+          - groups.node_fixture | length == 1
+          - groups.dmgr_fixture | length == 1
+          - hostvars['node-server'].fixture_discovery is mapping
+          - hostvars['dmgr-server'].fixture_discovery is mapping
+
+    - name: Start an ordered target list
+      ansible.builtin.set_fact:
+        discovered_targets: []
+
+    - name: Convert host discovery into capture targets
+      vars:
+        discovered_state: "{{ hostvars[item.fixture_host].fixture_discovery[item.service_name] }}"
+      ansible.builtin.set_fact:
+        discovered_targets: >-
+          {{ discovered_targets + [{
+            'target_id': item.target_id,
+            'lock_key': 'awx-e2e:' ~ maintenance_id ~ ':' ~ item.fixture_host,
+            'kind': fixture_kind,
+            'host': item.fixture_host,
+            'original_state': discovered_state,
+            'metadata': {'fixture_service': item.service_name}
+          }] }}
+      loop: "{{ fixture_targets }}"
+      loop_control:
+        label: "{{ item.target_id }}"
+
+    - name: Check discovery matches the seed contract
+      ansible.builtin.assert:
+        that:
+          - discovered_targets | length == fixture_targets | length
+          - item.original_state == (fixture_targets | selectattr('target_id', 'equalto', item.target_id) | map(attribute='initial_state') | first)
+      loop: "{{ discovered_targets }}"
+      loop_control:
+        label: "{{ item.target_id }}"
+
+    - name: Build the immutable capture artifact
+      ansible.builtin.set_fact:
+        capture_document:
+          captured_by: deterministic-awx-e2e
+          targets: "{{ discovered_targets }}"
+
+    - name: Publish the complete immutable document to downstream AWX jobs
+      ansible.builtin.set_stats:
+        data:
+          awx_e2e_capture_document: "{{ capture_document }}"
+        per_host: false
+        aggregate: false
+      changed_when: false

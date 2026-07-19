@@ -1,0 +1,42 @@
+---
+- name: Reset deterministic fixture process state
+  hosts: awx_fixture
+  gather_facts: false
+  tasks:
+    - name: Seed the host profile
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fixture-service, seed]
+      register: fixture_seed
+      changed_when: (fixture_seed.stdout | from_json).changed | bool
+
+    - name: Read seeded fixture state
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fixture-service, list, --json]
+      register: seeded_fixture
+      changed_when: false
+
+    - name: Save seeded fixture state for this job
+      ansible.builtin.set_fact:
+        fixture_states: "{{ seeded_fixture.stdout | from_json }}"
+
+    - name: Check the node fixture contract
+      when: fixture_profile == 'node'
+      ansible.builtin.assert:
+        that:
+          - fixture_states.web01 == 'running'
+          - fixture_states.web02 == 'running'
+          - fixture_states.web03 == 'running'
+          - fixture_states.web04 == 'stopped'
+          - fixture_states.web05 == 'stopped'
+          - fixture_states.service01 == 'running'
+          - fixture_states.service02 == 'running'
+          - fixture_states.service03 == 'running'
+          - fixture_states.nodeagent == 'running'
+          - fixture_states | length == 9
+
+    - name: Check the deployment manager fixture contract
+      when: fixture_profile == 'dmgr'
+      ansible.builtin.assert:
+        that:
+          - fixture_states.dmgr == 'running'
+          - fixture_states | length == 1

@@ -1,0 +1,159 @@
+---
+- name: Assert the completed API, event, capture, and external-state contract
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../fixture.yml
+  vars:
+    lazarus_token: "{{ lookup('env', 'LAZARUS_TOKEN') }}"
+    assert_profile: happy
+    fixture_expected_profile: "{{ fixture_expected_profiles[assert_profile] }}"
+  tasks:
+    - name: Require assertion inputs
+      ansible.builtin.assert:
+        that:
+          - lazarus_url | default('') | length > 0
+          - lazarus_token | length > 0
+          - maintenance_id | default('') | length > 0
+          - assert_profile in ['happy', 'recovery']
+          - assert_profile != 'recovery' or (recovery_justification | default('') | trim | length > 0)
+          - awx_e2e_capture_document is defined
+          - awx_e2e_capture_document is mapping
+
+    - name: Read final maintenance aggregate
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: final_aggregate
+      changed_when: false
+
+    - name: Check final aggregate identity and deterministic version
+      ansible.builtin.assert:
+        that:
+          - final_aggregate.json.maintenance.id == maintenance_id
+          - final_aggregate.json.maintenance.state == fixture_expected_profile.maintenance_state
+          - final_aggregate.json.maintenance.version == fixture_expected_profile.maintenance_version
+          - final_aggregate.etag == fixture_expected_profile.maintenance_etag
+          - final_aggregate.json.targets | length == fixture_targets | length
+
+    - name: Check every final target state and version
+      vars:
+        expected_spec: "{{ fixture_targets | selectattr('target_id', 'equalto', item.id) | first }}"
+        expected_state: >-
+          {{ fixture_expected_profile.running_target_state
+             if expected_spec.initial_state == 'running'
+             else fixture_expected_profile.stopped_target_state }}
+        expected_version: >-
+          {{ fixture_expected_profile.running_target_version
+             if expected_spec.initial_state == 'running'
+             else fixture_expected_profile.stopped_target_version }}
+      ansible.builtin.assert:
+        that:
+          - item.original_state == expected_spec.initial_state
+          - item.host == expected_spec.fixture_host
+          - item.kind == fixture_kind
+          - item.state == expected_state
+          - item.version == (expected_version | int)
+      loop: "{{ final_aggregate.json.targets }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Read immutable capture from Lazarus
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/capture"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: saved_capture
+      changed_when: false
+
+    - name: Check API capture equals the propagated discovery artifact
+      ansible.builtin.assert:
+        that:
+          - saved_capture.json.payload == awx_e2e_capture_document
+          - saved_capture.json.payload.targets | length == 10
+          - saved_capture.json.sha256 is match('^[0-9a-f]{64}$')
+
+    - name: Read the complete filtered event history
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ lazarus_url | regex_replace('/+$', '') }}/events?maintenance_id={{ maintenance_id | urlencode }}&limit=200"
+        method: GET
+        headers: {Authorization: "Bearer {{ lazarus_token }}"}
+        status_code: 200
+        validate_certs: true
+        ca_path: "{{ lazarus_ca_path | default(omit) }}"
+      register: event_page
+      changed_when: false
+
+    - name: Derive event categories
+      ansible.builtin.set_fact:
+        maintenance_events: "{{ event_page.json['items'] | selectattr('resource_type', 'equalto', 'maintenance') | list }}"
+        transition_events: "{{ event_page.json['items'] | selectattr('type', 'equalto', 'target.transitioned') | list }}"
+        observation_events: "{{ event_page.json['items'] | selectattr('type', 'equalto', 'target.observed') | list }}"
+        reopened_events: "{{ event_page.json['items'] | selectattr('type', 'equalto', 'maintenance.reopened') | list }}"
+        originally_stopped_events: >-
+          {{ event_page.json['items'] | selectattr('target_id', 'defined') |
+             selectattr('target_id', 'in', ['web-04', 'web-05']) | list }}
+
+    - name: Start the observed target-transition order
+      ansible.builtin.set_fact:
+        actual_transition_order: []
+
+    - name: Materialize target-transition order from newest to oldest
+      ansible.builtin.set_fact:
+        actual_transition_order: "{{ actual_transition_order + [item.target_id ~ ':' ~ item.to_state] }}"
+      loop: "{{ transition_events }}"
+      loop_control:
+        label: "{{ item.target_id }} -> {{ item.to_state }}"
+
+    - name: Check deterministic event totals and stopped-target silence
+      ansible.builtin.assert:
+        that:
+          - event_page.json.next_cursor is not defined
+          - event_page.json['items'] | length == fixture_expected_profile.event_count
+          - maintenance_events | length == fixture_expected_profile.maintenance_event_count
+          - transition_events | length == fixture_expected_profile.target_transition_count
+          - observation_events | length == fixture_expected_profile.observation_count
+          - reopened_events | length == fixture_expected_profile.reopened_event_count
+          - originally_stopped_events | length == 0
+          - actual_transition_order == fixture_expected_transition_order
+
+    - name: Check the single administrator reopen audit event
+      when: assert_profile == 'recovery'
+      ansible.builtin.assert:
+        that:
+          - reopened_events | length == 1
+          - reopened_events[0].resource_type == 'maintenance'
+          - reopened_events[0].resource_id == maintenance_id
+          - reopened_events[0].from_state == 'failed'
+          - reopened_events[0].to_state == 'stopping'
+          - reopened_events[0].role == 'admin'
+          - reopened_events[0].request_id is match('^awx-e2e-reopen-')
+          - reopened_events[0].payload.justification == recovery_justification
+
+    - name: Read every external fixture process
+      delegate_to: "{{ item.fixture_host }}"
+      ansible.builtin.command:
+        argv: [/usr/local/bin/fixture-service, get, "{{ item.service_name }}"]
+      loop: "{{ fixture_targets }}"
+      loop_control:
+        label: "{{ item.target_id }}"
+      register: external_states
+      changed_when: false
+
+    - name: Check the external state exactly matches the initial fixture
+      ansible.builtin.assert:
+        that: item.stdout | trim == item.item.initial_state
+        fail_msg: "{{ item.item.target_id }} was not restored to its initial state."
+      loop: "{{ external_states.results }}"
+      loop_control:
+        label: "{{ item.item.target_id }}"

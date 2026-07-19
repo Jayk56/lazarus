@@ -1,0 +1,220 @@
+---
+- name: Resolve target fixture metadata
+  ansible.builtin.set_fact:
+    target_spec: "{{ fixture_targets | selectattr('target_id', 'equalto', target_id) | first }}"
+
+- name: Require an originally-running target in an ordered batch
+  ansible.builtin.assert:
+    that:
+      - target_spec.target_id == target_id
+      - target_spec.initial_state == 'running'
+      - target_spec.fixture_host in ['node-server', 'dmgr-server']
+
+- name: Read target and exact ETag before the phase transition
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+    method: GET
+    headers: {Authorization: "Bearer {{ lazarus_token }}"}
+    status_code: [200, 500, 503]
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  register: target_before_transition
+  retries: 3
+  delay: 2
+  until: target_before_transition.status not in [500, 503]
+  changed_when: false
+
+- name: Require the expected immutable target identity
+  ansible.builtin.assert:
+    that:
+      - target_before_transition.json.original_state == 'running'
+      - target_before_transition.json.host == target_spec.fixture_host
+      - target_before_transition.json.kind == fixture_kind
+
+- name: Enter the target phase with its exact ETag
+  when: target_before_transition.json.state not in [target_transition_state, target_final_state]
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ lazarus_token }}"
+      If-Match: "{{ target_before_transition.etag }}"
+      X-Request-ID: "awx-e2e-target-{{ (maintenance_id ~ '|' ~ target_id ~ '|' ~ target_transition_state) | hash('sha256') }}"
+    body_format: json
+    body:
+      state: "{{ target_transition_state }}"
+      detail: {fixture: deterministic-awx-e2e, ordered_batch: "{{ fixture_group }}"}
+    status_code: [200, 400, 403, 409, 412, 500, 503]
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  register: target_transition
+  retries: 3
+  delay: 2
+  until: target_transition.status not in [500, 503]
+  changed_when: target_transition.status == 200
+
+- name: Fail on a terminal phase-transition rejection
+  when:
+    - target_transition is defined
+    - target_transition.status | default(200) in [400, 403, 409]
+  ansible.builtin.fail:
+    msg: >-
+      Lazarus rejected {{ target_id }} -> {{ target_transition_state }}:
+      {{ target_transition.json.reason | default(target_transition.json.error) |
+      default('request rejected') }}.
+
+- name: Read target after the phase transition
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+    method: GET
+    headers: {Authorization: "Bearer {{ lazarus_token }}"}
+    status_code: 200
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  register: target_in_phase
+  changed_when: false
+
+- name: Reconcile an ETag race only to the intended phase or final state
+  ansible.builtin.assert:
+    that: target_in_phase.json.state in [target_transition_state, target_final_state]
+    fail_msg: A concurrent write moved the target outside this batch phase.
+
+- name: Prove a stale target ETag is rejected without side effects
+  when:
+    - fixture_group == 'stop_app_services'
+    - target_id == 'web-01'
+    - target_transition is defined
+    - target_transition.status | default(0) == 200
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ lazarus_token }}"
+      If-Match: "{{ target_before_transition.etag }}"
+      X-Request-ID: "awx-e2e-stale-etag-{{ maintenance_id | hash('sha256') }}"
+    body_format: json
+    body:
+      state: "{{ target_final_state }}"
+      detail: {fixture: deterministic-awx-e2e, expected_result: stale-etag}
+    status_code: 412
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  changed_when: false
+
+- name: Apply the idempotent fixture operation over SSH
+  vars:
+    fixture_operation_service: >-
+      {{ 'awx-e2e-unknown-service'
+         if target_id == fixture_failure_target_id
+         else target_spec.service_name }}
+  delegate_to: "{{ target_spec.fixture_host }}"
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/fixture-service
+      - set
+      - "{{ fixture_operation_service }}"
+      - "{{ fixture_desired_state }}"
+  register: fixture_operation
+  changed_when: >-
+    (fixture_operation.stdout | default('{"changed":false}', true) |
+    from_json).changed | bool
+
+- name: Verify external fixture state
+  delegate_to: "{{ target_spec.fixture_host }}"
+  ansible.builtin.command:
+    argv: [/usr/local/bin/fixture-service, get, "{{ target_spec.service_name }}"]
+  register: fixture_state
+  changed_when: false
+
+- name: Require the exact external state
+  ansible.builtin.assert:
+    that: fixture_state.stdout | trim == fixture_desired_state
+
+- name: Record the deterministic observation with the current exact ETag
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}/observations"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ lazarus_token }}"
+      If-Match: "{{ target_in_phase.etag }}"
+      X-Request-ID: "awx-e2e-observe-{{ (maintenance_id ~ '|' ~ target_id ~ '|' ~ target_final_state) | hash('sha256') }}"
+    body_format: json
+    body:
+      source: deterministic-awx-e2e
+      check: fixture-service-state
+      observed_state: "{{ target_final_state }}"
+      fixture_state: "{{ fixture_desired_state }}"
+      fixture_service: "{{ target_spec.service_name }}"
+    status_code: [204, 409, 412, 500, 503]
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  register: target_observation
+  retries: 3
+  delay: 2
+  until: target_observation.status not in [500, 503]
+  changed_when: false
+
+- name: Reject observation conflicts and stale ETags
+  when: target_observation.status in [409, 412]
+  ansible.builtin.fail:
+    msg: >-
+      Observation for {{ target_id }} was rejected:
+      {{ target_observation.json.reason | default(target_observation.json.error) |
+      default('stale target or reused request ID') }}.
+
+- name: Finish the target phase using the observation ETag
+  when: target_in_phase.json.state != target_final_state
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ lazarus_token }}"
+      If-Match: "{{ target_in_phase.etag }}"
+      X-Request-ID: "awx-e2e-target-{{ (maintenance_id ~ '|' ~ target_id ~ '|' ~ target_final_state) | hash('sha256') }}"
+    body_format: json
+    body:
+      state: "{{ target_final_state }}"
+      detail:
+        fixture: deterministic-awx-e2e
+        verified_state: "{{ fixture_desired_state }}"
+    status_code: [200, 400, 403, 409, 412, 500, 503]
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  register: target_final_transition
+  retries: 3
+  delay: 2
+  until: target_final_transition.status not in [500, 503]
+  changed_when: target_final_transition.status == 200
+
+- name: Fail on a terminal final-state rejection
+  when:
+    - target_final_transition is defined
+    - target_final_transition.status | default(200) in [400, 403, 409]
+  ansible.builtin.fail:
+    msg: >-
+      Lazarus rejected {{ target_id }} -> {{ target_final_state }}:
+      {{ target_final_transition.json.reason |
+      default(target_final_transition.json.error) | default('request rejected') }}.
+
+- name: Read final target state
+  no_log: true
+  ansible.builtin.uri:
+    url: "{{ lazarus_url | regex_replace('/+$', '') }}/maintenance/{{ maintenance_id }}/targets/{{ target_id }}"
+    method: GET
+    headers: {Authorization: "Bearer {{ lazarus_token }}"}
+    status_code: 200
+    validate_certs: true
+    ca_path: "{{ lazarus_ca_path | default(omit) }}"
+  register: target_after_phase
+  changed_when: false
+
+- name: Reconcile only the requested final target state
+  ansible.builtin.assert:
+    that: target_after_phase.json.state == target_final_state
+    fail_msg: The target did not finish in the required state.

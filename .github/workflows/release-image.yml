@@ -1,0 +1,470 @@
+name: Release container image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish GHCR image and release assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate release tag and derive metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s LICENSE || {
+            echo "A non-empty LICENSE file is required for a release." >&2
+            exit 1
+          }
+
+          tag="${GITHUB_REF_NAME}"
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if [[ ! "${tag}" =~ ${semver} ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH with an optional prerelease suffix." >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          if [[ "${version}" == *-* ]]; then
+            prerelease="${version#*-}"
+            IFS='.' read -r -a identifiers <<< "${prerelease}"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "${identifier}" =~ ^[0-9]+$ && "${identifier}" != "0" && "${identifier}" == 0* ]]; then
+                echo "Numeric prerelease identifiers must not have leading zeroes." >&2
+                exit 1
+              fi
+            done
+            is_prerelease=true
+          else
+            is_prerelease=false
+          fi
+
+          image="ghcr.io/$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          source="https://github.com/${GITHUB_REPOSITORY}"
+          build_date="$(git show -s --format=%cI "${GITHUB_SHA}")"
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          asset_dir="${RUNNER_TEMP}/lazarus-release"
+          archive_name="lazarus-${version}.oci.tar.gz"
+          mkdir -p "${asset_dir}"
+
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "is_prerelease=${is_prerelease}"
+            echo "license_id=Apache-2.0"
+            echo "image=${image}"
+            echo "source=${source}"
+            echo "build_date=${build_date}"
+            echo "source_date_epoch=${source_date_epoch}"
+            echo "asset_dir=${asset_dir}"
+            echo "archive_name=${archive_name}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.21.0
+
+      - name: Install validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          validation_venv="${RUNNER_TEMP}/lazarus-validation-venv"
+          python3 -m venv "${validation_venv}"
+          "${validation_venv}/bin/python" -m pip install --disable-pip-version-check \
+            -r scripts/validation-requirements.txt
+          GOBIN="${validation_venv}/bin" \
+            go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "${validation_venv}/bin" >> "${GITHUB_PATH}"
+
+      - name: Run the source gate
+        env:
+          GOCACHE: ${{ runner.temp }}/go-build-cache
+        run: make validate-source
+
+      - name: Create or reuse draft GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ steps.release.outputs.is_prerelease }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if release_json="$(gh release view "${TAG}" --json isDraft,url 2>/dev/null)"; then
+            if [[ "$(jq -r '.isDraft' <<< "${release_json}")" != "true" ]]; then
+              echo "Release ${TAG} is already published and cannot be modified." >&2
+              exit 1
+            fi
+          else
+            args=(release create "${TAG}" --draft --verify-tag --generate-notes --title "Lazarus ${VERSION}")
+            if [[ "${IS_PRERELEASE}" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh "${args[@]}"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Generate distribution license files
+        shell: bash
+        env:
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+        run: |
+          set -euo pipefail
+          license_root="${RUNNER_TEMP}/lazarus-license-files"
+          for platform in linux/amd64 linux/arm64; do
+            destination="${license_root}/${platform#linux/}"
+            docker buildx build \
+              --platform "${platform}" \
+              --target license-files \
+              --output "type=local,dest=${destination}" \
+              .
+          done
+          cmp "${license_root}/amd64/LICENSE" "${license_root}/arm64/LICENSE"
+          cmp "${license_root}/amd64/THIRD_PARTY_LICENSES" \
+            "${license_root}/arm64/THIRD_PARTY_LICENSES"
+          cp "${license_root}/amd64/LICENSE" "${ASSET_DIR}/LICENSE"
+          cp "${license_root}/amd64/THIRD_PARTY_LICENSES" \
+            "${ASSET_DIR}/THIRD_PARTY_LICENSES"
+          test -s "${ASSET_DIR}/LICENSE"
+          test -s "${ASSET_DIR}/THIRD_PARTY_LICENSES"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and OCI metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ steps.release.outputs.image }}
+          flavor: latest=auto
+          labels: |
+            org.opencontainers.image.licenses=${{ steps.release.outputs.license_id }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+
+      - name: Build and publish multi-platform image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ steps.release.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.release.outputs.build_date }}
+            SOURCE=${{ steps.release.outputs.source }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=lazarus-release
+          cache-to: type=gha,mode=max,scope=lazarus-release
+
+      - name: Scan the published image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.release.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: json
+          output: ${{ steps.release.outputs.asset_dir }}/vulnerability-scan.json
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          timeout: 15m0s
+
+      - name: Verify the vulnerability report
+        shell: bash
+        env:
+          REPORT: ${{ steps.release.outputs.asset_dir }}/vulnerability-scan.json
+        run: |
+          set -euo pipefail
+          jq -e '.SchemaVersion == 2 and (.Results | type == "array")' \
+            "${REPORT}" >/dev/null
+
+      - name: Verify digest and extract image metadata
+        id: image_metadata
+        shell: bash
+        env:
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+          BUILD_DATE: ${{ steps.release.outputs.build_date }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          LICENSE_ID: ${{ steps.release.outputs.license_id }}
+          SOURCE: ${{ steps.release.outputs.source }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          reference="${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "${reference}" --raw > "${ASSET_DIR}/image-manifest.json"
+          manifest_digest="sha256:$(sha256sum "${ASSET_DIR}/image-manifest.json" | awk '{print $1}')"
+          if [[ "${manifest_digest}" != "${DIGEST}" ]]; then
+            echo "Published manifest digest ${manifest_digest} does not match ${DIGEST}." >&2
+            exit 1
+          fi
+
+          amd64_digest="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest' "${ASSET_DIR}/image-manifest.json")"
+          arm64_digest="$(jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest' "${ASSET_DIR}/image-manifest.json")"
+
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .SBOM "linux/amd64").SPDX }}' > "${ASSET_DIR}/sbom-linux-amd64.spdx.json"
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .SBOM "linux/arm64").SPDX }}' > "${ASSET_DIR}/sbom-linux-arm64.spdx.json"
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .Provenance "linux/amd64").SLSA }}' > "${ASSET_DIR}/provenance-linux-amd64.slsa.json"
+          docker buildx imagetools inspect "${reference}" --format '{{ json (index .Provenance "linux/arm64").SLSA }}' > "${ASSET_DIR}/provenance-linux-arm64.slsa.json"
+          jq -e '.spdxVersion and .SPDXID' "${ASSET_DIR}"/sbom-*.spdx.json >/dev/null
+          jq -e '.buildType and .builder' "${ASSET_DIR}"/provenance-*.slsa.json >/dev/null
+
+          printf '%s\n' "${DIGEST}" > "${ASSET_DIR}/image-digest.txt"
+          tags_json="$(printf '%s\n' "${IMAGE_TAGS}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+          workflow_run="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+          jq -n \
+            --arg image_reference "${reference}" \
+            --arg version "${VERSION}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg build_date "${BUILD_DATE}" \
+            --arg source "${SOURCE}" \
+            --arg project_license "${LICENSE_ID}" \
+            --arg workflow_run "${workflow_run}" \
+            --argjson tags "${tags_json}" \
+            '{schema_version: 1, image: $image_reference, version: $version, commit: $commit, build_date: $build_date, source: $source, project_license: $project_license, workflow_run: $workflow_run, platforms: ["linux/amd64", "linux/arm64"], tags: $tags}' \
+            > "${ASSET_DIR}/release.json"
+
+          {
+            echo "amd64_digest=${amd64_digest}"
+            echo "arm64_digest=${arm64_digest}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Attest image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest linux/amd64 SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          subject-digest: ${{ steps.image_metadata.outputs.amd64_digest }}
+          sbom-path: ${{ steps.release.outputs.asset_dir }}/sbom-linux-amd64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest linux/arm64 SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          subject-digest: ${{ steps.image_metadata.outputs.arm64_digest }}
+          sbom-path: ${{ steps.release.outputs.asset_dir }}/sbom-linux-arm64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Sign image keylessly
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.release.outputs.image }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.3
+
+      - name: Export signed image and recursive referrers
+        shell: bash
+        env:
+          AMD64_DIGEST: ${{ steps.image_metadata.outputs.amd64_digest }}
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive_name }}
+          ARM64_DIGEST: ${{ steps.image_metadata.outputs.arm64_digest }}
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          SOURCE_DATE_EPOCH: ${{ steps.release.outputs.source_date_epoch }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          layout="${ASSET_DIR}/oci-layout"
+          reference="${IMAGE}@${DIGEST}"
+          oras cp --recursive --to-oci-layout "${reference}" "${layout}:${VERSION}"
+          copied_digest="$(oras resolve --oci-layout "${layout}:${VERSION}")"
+          if [[ "${copied_digest}" != "${DIGEST}" ]]; then
+            echo "OCI layout digest ${copied_digest} does not match ${DIGEST}." >&2
+            exit 1
+          fi
+
+          oras discover --oci-layout "${layout}:${VERSION}" --format json > "${RUNNER_TEMP}/lazarus-index-referrers.json"
+          oras discover --oci-layout "${layout}@${AMD64_DIGEST}" --format json > "${RUNNER_TEMP}/lazarus-amd64-referrers.json"
+          oras discover --oci-layout "${layout}@${ARM64_DIGEST}" --format json > "${RUNNER_TEMP}/lazarus-arm64-referrers.json"
+          jq -e '.referrers | length >= 2' "${RUNNER_TEMP}/lazarus-index-referrers.json" >/dev/null
+          jq -e '.referrers | length >= 1' "${RUNNER_TEMP}/lazarus-amd64-referrers.json" >/dev/null
+          jq -e '.referrers | length >= 1' "${RUNNER_TEMP}/lazarus-arm64-referrers.json" >/dev/null
+          archive_tar="${RUNNER_TEMP}/lazarus-${VERSION}.oci.tar"
+          tar --sort=name \
+            --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            -C "${layout}" -cf "${archive_tar}" .
+          archive_layout="${RUNNER_TEMP}/lazarus-${VERSION}-archive-layout"
+          mkdir -p "${archive_layout}"
+          tar -C "${archive_layout}" -xf "${archive_tar}"
+          archive_digest="$(oras resolve --oci-layout "${archive_layout}:${VERSION}")"
+          if [[ "${archive_digest}" != "${DIGEST}" ]]; then
+            echo "Extracted OCI archive digest ${archive_digest} does not match ${DIGEST}." >&2
+            exit 1
+          fi
+          gzip -n -9 < "${archive_tar}" > "${ASSET_DIR}/${ARCHIVE_NAME}"
+          test -s "${ASSET_DIR}/${ARCHIVE_NAME}"
+
+      - name: Sign offline archive keylessly
+        shell: bash
+        env:
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive_name }}
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle "${ASSET_DIR}/${ARCHIVE_NAME}.sigstore.json" \
+            "${ASSET_DIR}/${ARCHIVE_NAME}"
+
+      - name: Package digest-pinned Helm assets
+        shell: bash
+        env:
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          values="${ASSET_DIR}/lazarus-${VERSION}-values.yaml"
+          {
+            echo "image:"
+            printf '  repository: %s\n' "${IMAGE}"
+            echo '  tag: ""'
+            printf '  digest: %s\n' "${DIGEST}"
+          } > "${values}"
+          cp "${ASSET_DIR}/LICENSE" deploy/helm/lazarus/LICENSE
+          cp "${ASSET_DIR}/THIRD_PARTY_LICENSES" deploy/helm/lazarus/THIRD_PARTY_LICENSES
+          helm package deploy/helm/lazarus \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination "${ASSET_DIR}"
+
+      - name: Finalize and verify release checksums
+        shell: bash
+        env:
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+        run: |
+          set -euo pipefail
+          checksum_file="${RUNNER_TEMP}/lazarus-SHA256SUMS"
+          (
+            cd "${ASSET_DIR}"
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+              | LC_ALL=C sort \
+              | xargs sha256sum > "${checksum_file}"
+            sha256sum -c "${checksum_file}"
+            cp "${checksum_file}" SHA256SUMS
+          )
+
+      - name: Attest release assets
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-checksums: ${{ steps.release.outputs.asset_dir }}/SHA256SUMS
+
+      - name: Upload all assets to draft release
+        shell: bash
+        env:
+          ASSET_DIR: ${{ steps.release.outputs.asset_dir }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find "${ASSET_DIR}" -maxdepth 1 -type f -print0 | sort -z)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No release assets were produced." >&2
+            exit 1
+          fi
+          gh release upload "${TAG}" "${assets[@]}" --clobber
+
+      - name: Publish immutable-ready GitHub Release
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "${TAG}" --draft=false
+          release_url="$(gh release view "${TAG}" --json isDraft,url --jq 'select(.isDraft == false) | .url')"
+          test -n "${release_url}"
+          echo "release_url=${release_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish release summary
+        shell: bash
+        env:
+          ARCHIVE_NAME: ${{ steps.release.outputs.archive_name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          RELEASE_URL: ${{ steps.publish.outputs.release_url }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            echo "## Lazarus ${VERSION} container release"
+            echo
+            echo "| Output | Immutable reference |"
+            echo "| --- | --- |"
+            echo "| GHCR image | \`${IMAGE}@${DIGEST}\` |"
+            echo "| Offline image bundle | \`${ARCHIVE_NAME}\` on [GitHub Release](${RELEASE_URL}) |"
+            echo "| GitHub Release | ${RELEASE_URL} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

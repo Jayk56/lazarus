@@ -1,0 +1,594 @@
+openapi: 3.0.3
+info:
+  title: Lazarus Maintenance API
+  version: 1.0.0
+  description: >-
+    Create maintenance runs, save discovered target state, update it as work
+    proceeds, and read the resulting event history. API responses carry
+    X-Request-ID and Cache-Control: no-store. State changes use version ETags
+    with If-Match; see docs/api.md for examples and workflow rules.
+servers: [{url: /}]
+security: [{bearerAuth: []}]
+
+paths:
+  /healthz:
+    get: &processProbe
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/ProbeOK'}
+        '405': {$ref: '#/components/responses/PublicMethodNotAllowed'}
+  /livez:
+    get: *processProbe
+  /startupz:
+    get: *processProbe
+  /readyz:
+    get:
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/ProbeOK'}
+        '405': {$ref: '#/components/responses/PublicMethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ProbeUnavailable'}
+  /version:
+    get:
+      security: []
+      responses:
+        '200':
+          description: Service version
+          headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Version'}}}
+        '405': {$ref: '#/components/responses/PublicMethodNotAllowed'}
+  /metrics:
+    get:
+      security: []
+      responses:
+        '200':
+          description: Prometheus metrics in plain text
+          headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+          content: {text/plain: {schema: {type: string}}}
+        '405': {$ref: '#/components/responses/PublicMethodNotAllowed'}
+
+  /api/v1/maintenance:
+    get:
+      summary: List maintenance runs
+      description: Reader role. Returns newest records first. Return next_cursor unchanged to fetch the next page; see docs/api.md.
+      parameters:
+        - {in: query, name: state, schema: {type: string}}
+        - {in: query, name: maintenance_id, schema: {type: string}}
+        - {in: query, name: change_ticket, schema: {type: string}}
+        - {in: query, name: workflow_version, schema: {type: string}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Maintenance page
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/MaintenancePage'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+    post:
+      summary: Create a maintenance run
+      description: Operator role. The response starts in state new and includes its ETag.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/MaintenanceCreate'}}}
+      responses:
+        '201':
+          description: New record with an empty targets array
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/MaintenanceWithTargets'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/maintenance/{maintenanceId}:
+    parameters: [{$ref: '#/components/parameters/MaintenanceID'}]
+    get:
+      summary: Read a maintenance run
+      description: Reader role. Returns the record and all of its targets. The ETag changes when either the record or a target changes.
+      responses:
+        '200':
+          description: Current record and target state
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/MaintenanceWithTargets'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+    patch:
+      summary: Change maintenance state
+      description: >-
+        Operator role. Completion checks all targets. Reopening a failed record
+        requires admin role and a justification. A state change updates every
+        target ETag.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/StateChange'}}}
+      responses:
+        '200':
+          description: Updated record and targets
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/MaintenanceWithTargets'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/maintenance/{maintenanceId}/capture:
+    parameters: [{$ref: '#/components/parameters/MaintenanceID'}]
+    get:
+      summary: Read the saved capture
+      description: Reader role. Returns the original discovery document, timestamp, and hash.
+      responses:
+        '200':
+          description: Capture
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Capture'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+    put:
+      summary: Save a capture or send the same capture again
+      description: >-
+        Operator role. Send the discovery document as a JSON object up to 2 MiB.
+        Sending the same document again returns 200; different content returns 409.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        '200':
+          description: The same capture was already saved
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Capture'}}}
+        '201':
+          description: Created
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Capture'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/maintenance/{maintenanceId}/targets/{targetId}:
+    parameters:
+      - {$ref: '#/components/parameters/MaintenanceID'}
+      - {$ref: '#/components/parameters/TargetID'}
+    get:
+      summary: Read a captured target
+      description: Reader role. Every captured target, including degraded and unknown targets, can be read.
+      responses:
+        '200':
+          description: Current target
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Target'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+    patch:
+      summary: Change target state
+      description: Operator role. The skipped state requires admin role and a justification.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/StateChange'}}}
+      responses:
+        '200':
+          description: Updated target
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            ETag: {$ref: '#/components/headers/ETag'}
+            X-Maintenance-ETag: {$ref: '#/components/headers/MaintenanceETag'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Target'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/maintenance/{maintenanceId}/targets/{targetId}/observations:
+    parameters:
+      - {$ref: '#/components/parameters/MaintenanceID'}
+      - {$ref: '#/components/parameters/TargetID'}
+    post:
+      summary: Record a target observation
+      description: >-
+        Operator role. Send an observation object up to 64 KiB. If-Match checks
+        the target version. Retrying the same JSON and X-Request-ID succeeds
+        without adding another event, even after the version changes.
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: true}}}
+      responses:
+        '204':
+          description: Observation recorded, or the same request was already recorded
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+        '428': {$ref: '#/components/responses/PreconditionRequired'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/events:
+    get:
+      summary: Read event history
+      description: Reader role. Returns newest events first. Return next_cursor unchanged to fetch the next page. All supplied filters must match.
+      parameters:
+        - {in: query, name: maintenance_id, schema: {type: string}}
+        - {in: query, name: target_id, description: Requires maintenance_id, schema: {type: string}}
+        - {in: query, name: event_type, schema: {type: string}}
+        - {in: query, name: resource_type, schema: {type: string}}
+        - {in: query, name: resource_id, schema: {type: string}}
+        - {in: query, name: actor, schema: {type: string}}
+        - {in: query, name: role, schema: {type: string}}
+        - {in: query, name: request_id, schema: {type: string}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Event page
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/EventPage'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/admin/backups:
+    post:
+      summary: Create a verified backup
+      description: Admin role. Creates and verifies a SQLite backup and its JSON manifest. Reusing the same request ID as the same authenticated caller returns the existing backup while it is retained.
+      responses:
+        '201':
+          description: Verified backup manifest
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/BackupManifest'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+  /api/v1/admin/backups/{filename}:
+    parameters:
+      - {in: path, name: filename, required: true, schema: {type: string}}
+    get:
+      summary: Download a verified backup file
+      description: Admin role. Validates the named file, records the download, and streams the database or JSON manifest.
+      responses:
+        '200':
+          description: SQLite database or JSON manifest
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            Content-Disposition: {schema: {type: string}}
+            Content-Length: {schema: {type: integer, format: int64}}
+            ETag: {$ref: '#/components/headers/ETag'}
+            Digest: {schema: {type: string}}
+          content:
+            application/vnd.sqlite3: {schema: {type: string, format: binary}}
+            application/json: {schema: {type: object}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+    head:
+      summary: Inspect and record a verified backup file without a body
+      description: Admin role. Performs the same validation and recording as GET, but returns headers only.
+      responses:
+        '200':
+          description: Verified backup file headers
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/RequestID'}
+            Cache-Control: {$ref: '#/components/headers/NoStore'}
+            Content-Disposition: {schema: {type: string}}
+            Content-Length: {schema: {type: integer, format: int64}}
+            ETag: {$ref: '#/components/headers/ETag'}
+            Digest: {schema: {type: string}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '405': {$ref: '#/components/responses/MethodNotAllowed'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+        default: {$ref: '#/components/responses/InternalError'}
+
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    MaintenanceID: {in: path, name: maintenanceId, required: true, schema: {type: string}}
+    TargetID: {in: path, name: targetId, required: true, schema: {type: string}}
+    IfMatch:
+      in: header
+      name: If-Match
+      required: true
+      description: Send a quoted version such as "2", a comma-separated list of tags, or *. Weak tags beginning with W/ never match.
+      schema: {type: string}
+    Cursor: {in: query, name: cursor, schema: {type: string}}
+    Limit: {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 200, default: 100}}
+  headers:
+    RequestID: {description: Caller-supplied or generated request ID (up to 128 bytes), schema: {type: string}}
+    NoStore: {description: Prevents clients and proxies from caching API data, schema: {type: string, example: no-store}}
+    ETag: {description: Strong quoted resource version, schema: {type: string}}
+    MaintenanceETag: {description: New maintenance version after a target write, schema: {type: string}}
+  responses:
+    ProbeOK:
+      description: Healthy
+      headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Probe'}}}
+    PublicMethodNotAllowed:
+      description: Method not supported for this path
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Allow: {schema: {type: string}}
+    ProbeUnavailable:
+      description: Readiness check failed
+      headers: {X-Request-ID: {$ref: '#/components/headers/RequestID'}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    BadRequest:
+      description: Invalid JSON, query, or header
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unauthorized:
+      description: Bearer token is missing or invalid
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+        WWW-Authenticate: {schema: {type: string}}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Forbidden:
+      description: The token's role cannot perform this operation
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    NotFound:
+      description: Path or resource not found
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    MethodNotAllowed:
+      description: Method not supported for this path
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+        Allow: {schema: {type: string}}
+    Conflict:
+      description: Request conflicts with current state, lock, capture, or request ID
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    PreconditionFailed:
+      description: If-Match does not match the current version
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    PreconditionRequired:
+      description: If-Match was not supplied
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    ServiceUnavailable:
+      description: Service is unavailable or draining
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    InternalError:
+      description: Unexpected server error
+      headers:
+        X-Request-ID: {$ref: '#/components/headers/RequestID'}
+        Cache-Control: {$ref: '#/components/headers/NoStore'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+        message: {type: string}
+        detail: {type: string}
+        reason: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        holder: {type: string, description: Maintenance ID holding a conflicting lock}
+        expected_version: {type: integer, format: int64}
+        current_version: {type: integer, format: int64}
+        current_state: {type: string}
+        requested_state: {type: string}
+    Probe:
+      type: object
+      required: [status, version]
+      properties: {status: {type: string}, version: {type: string}}
+    Version:
+      type: object
+      required: [version]
+      properties: {version: {type: string}}
+    MaintenanceCreate:
+      type: object
+      additionalProperties: false
+      required: [maintenance_id]
+      properties:
+        maintenance_id: {type: string, description: ID for this maintenance run}
+        change_ticket: {type: string, description: Optional change or ticket ID}
+        workflow_version: {type: string, description: Optional caller label for the automation used in this run; not the API version}
+        metadata: {type: object, additionalProperties: true, description: Optional caller metadata}
+    StateChange:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state: {type: string}
+        justification: {type: string, maxLength: 4096, description: Required and non-empty when reopening a failed run or skipping a target}
+        detail: {type: object, additionalProperties: true}
+    Maintenance:
+      type: object
+      required: [id, state, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        state: {type: string, enum: [new, captured, stopping, stopped, waiting, starting, completed, failed, cancelled]}
+        change_ticket: {type: string}
+        workflow_version: {type: string}
+        metadata: {type: object, additionalProperties: true}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    Target:
+      type: object
+      required: [id, lock_key, state, original_state, version, created_at, updated_at]
+      properties:
+        id: {type: string}
+        maintenance_id: {type: string}
+        lock_key: {type: string}
+        state: {type: string, enum: [captured, stopping, stopped, starting, healthy, skipped, failed]}
+        original_state: {type: string, enum: [running, stopped, degraded, unknown]}
+        kind: {type: string}
+        host: {type: string}
+        observed_at: {type: string, format: date-time}
+        metadata: {type: object, additionalProperties: true}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    MaintenanceWithTargets:
+      type: object
+      description: A maintenance run and all of its captured targets.
+      required: [maintenance, targets]
+      properties:
+        maintenance: {$ref: '#/components/schemas/Maintenance'}
+        targets: {type: array, items: {$ref: '#/components/schemas/Target'}}
+    MaintenancePage:
+      type: object
+      description: A page of maintenance runs.
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Maintenance'}}
+        next_cursor: {type: string}
+    Capture:
+      type: object
+      description: The saved discovery document and its SHA-256 hash.
+      required: [maintenance_id, captured_at, payload, sha256]
+      properties:
+        maintenance_id: {type: string}
+        captured_at: {type: string, format: date-time}
+        payload: {type: object, additionalProperties: true}
+        sha256: {type: string}
+    Event:
+      type: object
+      description: One recorded API event.
+      required: [id, type, occurred_at, request_id, actor, role, resource_type, resource_id, payload]
+      properties:
+        id: {type: integer, format: int64}
+        type: {type: string}
+        occurred_at: {type: string, format: date-time}
+        request_id: {type: string}
+        actor: {type: string}
+        role: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: string}
+        maintenance_id: {type: string}
+        target_id: {type: string}
+        from_state: {type: string}
+        to_state: {type: string}
+        from_version: {type: integer, format: int64}
+        to_version: {type: integer, format: int64}
+        aggregate_version: {type: integer, format: int64, description: Maintenance run version immediately after this event}
+        payload: {type: object, additionalProperties: true}
+    EventPage:
+      type: object
+      description: A page of events.
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Event'}}
+        next_cursor: {type: string}
+    BackupManifest:
+      type: object
+      description: Checksums and verification results for a backup pair.
+      required: [filename, created_at, bytes, sha256, integrity_check, foreign_key_check, application_check, audit_recorded]
+      properties:
+        filename: {type: string}
+        created_at: {type: string, format: date-time}
+        bytes: {type: integer, format: int64}
+        sha256: {type: string}
+        sqlite_version: {type: string}
+        integrity_check: {type: string}
+        foreign_key_check: {type: string}
+        application_check: {type: string}
+        audit_recorded: {type: boolean}
